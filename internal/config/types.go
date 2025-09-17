@@ -71,10 +71,34 @@ type TimeWindow struct {
 
 // 数据范围配置
 type DataRange struct {
-	TimeColumn string     `yaml:"time_column" mapstructure:"time_column"` // 时间列名
-	StartTime  *time.Time `yaml:"start_time" mapstructure:"start_time"`   // 开始时间
-	EndTime    *time.Time `yaml:"end_time" mapstructure:"end_time"`       // 结束时间
-	Where      string     `yaml:"where" mapstructure:"where"`             // 额外的 WHERE 条件
+	TimeColumn string `yaml:"time_column" mapstructure:"time_column"` // 时间列名
+	StartTime  string `yaml:"start_time" mapstructure:"start_time"`   // 开始时间 (格式: "2006-01-02 15:04:05")
+	EndTime    string `yaml:"end_time" mapstructure:"end_time"`       // 结束时间 (格式: "2006-01-02 15:04:05")
+	Where      string `yaml:"where" mapstructure:"where"`             // 额外的 WHERE 条件
+}
+
+// GetStartTime 解析开始时间
+func (dr *DataRange) GetStartTime() (*time.Time, error) {
+	if dr.StartTime == "" {
+		return nil, nil
+	}
+	t, err := time.Parse("2006-01-02 15:04:05", dr.StartTime)
+	if err != nil {
+		return nil, fmt.Errorf("invalid start_time format: %w", err)
+	}
+	return &t, nil
+}
+
+// GetEndTime 解析结束时间
+func (dr *DataRange) GetEndTime() (*time.Time, error) {
+	if dr.EndTime == "" {
+		return nil, nil
+	}
+	t, err := time.Parse("2006-01-02 15:04:05", dr.EndTime)
+	if err != nil {
+		return nil, fmt.Errorf("invalid end_time format: %w", err)
+	}
+	return &t, nil
 }
 
 // 流量控制配置

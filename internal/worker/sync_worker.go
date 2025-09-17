@@ -350,16 +350,20 @@ func (w *SyncWorker) initializeSync() error {
 	if w.taskConfig.DataRange.TimeColumn != "" {
 		timeConditions := make([]string, 0)
 
-		if w.taskConfig.DataRange.StartTime != nil {
+		if startTime, err := w.taskConfig.DataRange.GetStartTime(); err != nil {
+			return fmt.Errorf("invalid start_time format: %w", err)
+		} else if startTime != nil {
 			timeConditions = append(timeConditions,
 				fmt.Sprintf("%s >= '%s'", w.taskConfig.DataRange.TimeColumn,
-					w.taskConfig.DataRange.StartTime.Format("2006-01-02 15:04:05")))
+					startTime.Format("2006-01-02 15:04:05")))
 		}
 
-		if w.taskConfig.DataRange.EndTime != nil {
+		if endTime, err := w.taskConfig.DataRange.GetEndTime(); err != nil {
+			return fmt.Errorf("invalid end_time format: %w", err)
+		} else if endTime != nil {
 			timeConditions = append(timeConditions,
 				fmt.Sprintf("%s < '%s'", w.taskConfig.DataRange.TimeColumn,
-					w.taskConfig.DataRange.EndTime.Format("2006-01-02 15:04:05")))
+					endTime.Format("2006-01-02 15:04:05")))
 		}
 
 		if len(timeConditions) > 0 {
@@ -571,16 +575,20 @@ func (w *SyncWorker) buildWhereClause() string {
 
 	// 添加时间范围条件
 	if w.taskConfig.DataRange.TimeColumn != "" {
-		if w.taskConfig.DataRange.StartTime != nil {
+		if startTime, err := w.taskConfig.DataRange.GetStartTime(); err != nil {
+			w.logger.Errorf("Invalid start_time format: %v", err)
+		} else if startTime != nil {
 			conditions = append(conditions,
 				fmt.Sprintf("%s >= '%s'", w.taskConfig.DataRange.TimeColumn,
-					w.taskConfig.DataRange.StartTime.Format("2006-01-02 15:04:05")))
+					startTime.Format("2006-01-02 15:04:05")))
 		}
 
-		if w.taskConfig.DataRange.EndTime != nil {
+		if endTime, err := w.taskConfig.DataRange.GetEndTime(); err != nil {
+			w.logger.Errorf("Invalid end_time format: %v", err)
+		} else if endTime != nil {
 			conditions = append(conditions,
 				fmt.Sprintf("%s < '%s'", w.taskConfig.DataRange.TimeColumn,
-					w.taskConfig.DataRange.EndTime.Format("2006-01-02 15:04:05")))
+					endTime.Format("2006-01-02 15:04:05")))
 		}
 	}
 
