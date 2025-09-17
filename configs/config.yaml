@@ -8,6 +8,21 @@ clickhouse:
   username: "default"
   password: ""
   database: "default"
+
+  # Flight SQL 配置
+  flight_sql_endpoint: "localhost"
+  flight_sql_port: 9090
+  use_tls: false
+  tls_cert_file: ""
+  tls_key_file: ""
+  tls_ca_file: ""
+
+  # Arrow Flight 配置
+  flight_timeout: "30s"
+  batch_size: 10000
+  compression_type: "lz4"  # none, gzip, lz4, zstd
+
+  # 连接配置
   max_block_size: 100000
   read_timeout: "30s"
   write_timeout: "30s"

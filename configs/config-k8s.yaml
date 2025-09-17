@@ -7,6 +7,15 @@ clickhouse:
   username: "default"
   password: ""
   database: "default"
+  flight_sql_endpoint: "clickhouse-service"
+  flight_sql_port: 9090
+  use_tls: true
+  tls_cert_file: "/etc/ssl/certs/clickhouse-cert.pem"
+  tls_key_file: "/etc/ssl/private/clickhouse-key.pem"
+  tls_ca_file: "/etc/ssl/certs/ca-cert.pem"
+  flight_timeout: "60s"
+  batch_size: 20000
+  compression_type: "zstd"
 
 starrocks:
   host: "starrocks-fe-service"

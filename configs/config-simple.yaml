@@ -7,6 +7,12 @@ clickhouse:
   username: "default"
   password: ""
   database: "default"
+  flight_sql_endpoint: "clickhouse"
+  flight_sql_port: 9090
+  use_tls: false
+  flight_timeout: "30s"
+  batch_size: 5000
+  compression_type: "lz4"
 
 starrocks:
   host: "starrocks-fe"

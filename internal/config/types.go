@@ -17,7 +17,21 @@ type DatabaseConfig struct {
 // ClickHouse 特定配置
 type ClickHouseConfig struct {
 	DatabaseConfig `yaml:",inline" mapstructure:",squash"`
-	// ClickHouse 特定参数
+
+	// Flight SQL 配置
+	FlightSQLEndpoint string `yaml:"flight_sql_endpoint" mapstructure:"flight_sql_endpoint"` // Flight SQL 服务端点
+	FlightSQLPort     int    `yaml:"flight_sql_port" mapstructure:"flight_sql_port"`         // Flight SQL 端口 (默认 9090)
+	UseTLS           bool   `yaml:"use_tls" mapstructure:"use_tls"`                         // 是否使用 TLS
+	TLSCertFile      string `yaml:"tls_cert_file" mapstructure:"tls_cert_file"`             // TLS 证书文件
+	TLSKeyFile       string `yaml:"tls_key_file" mapstructure:"tls_key_file"`               // TLS 密钥文件
+	TLSCAFile        string `yaml:"tls_ca_file" mapstructure:"tls_ca_file"`                 // TLS CA 文件
+
+	// Arrow Flight 配置
+	FlightTimeout    time.Duration `yaml:"flight_timeout" mapstructure:"flight_timeout"`       // Flight 超时时间
+	BatchSize        int           `yaml:"batch_size" mapstructure:"batch_size"`               // Arrow 批次大小
+	CompressionType  string        `yaml:"compression_type" mapstructure:"compression_type"`   // 压缩类型 (none, gzip, lz4, zstd)
+
+	// ClickHouse 特定参数（用于元数据查询）
 	MaxBlockSize   int           `yaml:"max_block_size" mapstructure:"max_block_size"`
 	ReadTimeout    time.Duration `yaml:"read_timeout" mapstructure:"read_timeout"`
 	WriteTimeout   time.Duration `yaml:"write_timeout" mapstructure:"write_timeout"`

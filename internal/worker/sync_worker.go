@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/apache/arrow/go/v14/arrow"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 
@@ -462,8 +463,8 @@ func (w *SyncWorker) performSync() error {
 
 // processBatch 处理一个批次
 func (w *SyncWorker) processBatch(offset, batchSize int64) (int64, error) {
-	// 读取数据
-	reader := w.chClient.NewDataReader(w.taskConfig.SourceTable)
+	// 使用Arrow Flight SQL读取数据
+	reader := w.chClient.NewArrowDataReader(w.taskConfig.SourceTable)
 
 	// 设置查询参数
 	if len(w.taskConfig.ColumnMapping) > 0 {
@@ -488,64 +489,58 @@ func (w *SyncWorker) processBatch(offset, batchSize int64) (int64, error) {
 		reader.WithOrderBy(w.taskConfig.DataRange.TimeColumn)
 	}
 
-	// 执行查询
-	rows, err := reader.Read(w.ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to read data: %w", err)
+	// 设置批次大小和列映射
+	reader.WithBatchSize(w.taskConfig.Concurrency.BatchSize)
+	if w.taskConfig.ColumnMapping != nil {
+		reader.WithColumnMapping(w.taskConfig.ColumnMapping)
 	}
-	defer rows.Close()
 
-	// 转换为批次数据
-	batch := pipeline.NewSimpleDataBatch()
-	rowCount := int64(0)
+	// 执行Arrow Flight SQL查询并处理每个Record
+	var totalRowCount int64
+	err := reader.ReadArrowBatch(w.ctx, func(record arrow.Record) error {
+		rowCount := record.NumRows()
+		totalRowCount += rowCount
 
-	for rows.Next() {
-		// 扫描行数据
-		columns := rows.Columns()
-		values := make([]interface{}, len(columns))
-		valuePtrs := make([]interface{}, len(columns))
-		for i := range values {
-			valuePtrs[i] = &values[i]
+		w.logger.Debugf("Processing Arrow record with %d rows", rowCount)
+
+		// 直接使用Arrow Flight SQL写入StarRocks
+		if err := w.writeArrowToTarget(record); err != nil {
+			return fmt.Errorf("failed to write Arrow record to target: %w", err)
 		}
 
-		if err := rows.Scan(valuePtrs...); err != nil {
-			return rowCount, fmt.Errorf("failed to scan row: %w", err)
-		}
+		return nil
+	})
 
-		// 创建数据行
-		row := pipeline.NewSimpleDataRow(columns, values)
-		batch.AddRow(row)
-		rowCount++
-	}
-
-	if err := rows.Err(); err != nil {
-		return rowCount, fmt.Errorf("row iteration error: %w", err)
-	}
-
-	if batch.IsEmpty() {
-		return 0, nil
-	}
-
-	// 通过处理管道
-	processedBatch, err := w.pipeline.Process(w.ctx, batch)
 	if err != nil {
-		return rowCount, fmt.Errorf("pipeline processing failed: %w", err)
+		return totalRowCount, fmt.Errorf("Arrow batch processing failed: %w", err)
 	}
 
-	if processedBatch.IsEmpty() {
-		w.logger.Debugf("Batch filtered out by pipeline")
-		return rowCount, nil
-	}
-
-	// 写入目标数据库
-	if err := w.writeToTarget(processedBatch); err != nil {
-		return rowCount, fmt.Errorf("failed to write to target: %w", err)
-	}
-
-	return rowCount, nil
+	return totalRowCount, nil
 }
 
-// writeToTarget 写入目标数据库
+// writeArrowToTarget 直接写入Arrow数据到目标数据库
+func (w *SyncWorker) writeArrowToTarget(record arrow.Record) error {
+	// 使用StarRocks的Arrow Flight SQL写入器
+	writer, err := w.srClient.NewArrowDataWriter(w.taskConfig.TargetTable, w.taskConfig.Concurrency.BatchSize)
+	if err != nil {
+		return fmt.Errorf("failed to create Arrow data writer: %w", err)
+	}
+
+	// 设置列映射
+	if w.taskConfig.ColumnMapping != nil {
+		writer.WithColumnMapping(w.taskConfig.ColumnMapping)
+	}
+
+	// 写入Arrow Record
+	if err := writer.WriteRecord(record); err != nil {
+		return fmt.Errorf("Arrow Flight SQL write failed: %w", err)
+	}
+
+	w.logger.Debugf("Arrow Flight SQL write completed: %d rows", record.NumRows())
+	return nil
+}
+
+// writeToTarget 写入目标数据库（保留向后兼容）
 func (w *SyncWorker) writeToTarget(batch pipeline.DataBatch) error {
 	// 转换为 CSV 数据
 	csvData := make([][]string, 0, batch.Size())

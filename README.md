@@ -4,10 +4,13 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)]()
 
-**ck2sr** 是一个高效、可靠、完整的 ClickHouse 到 StarRocks 数据同步服务，支持分布式部署，能够在生产环境中稳定运行。
+**ck2sr** 是一个高效、可靠、完整的 ClickHouse 到 StarRocks 数据同步服务，采用 **Apache Arrow Flight SQL** 协议实现高性能数据传输，支持分布式部署，能够在生产环境中稳定运行。
 
 ## 🌟 核心特性
 
+- **Apache Arrow Flight SQL**：统一采用 Apache Arrow Flight SQL 协议进行数据读取和写入，实现高性能列式数据传输
+- **零拷贝数据传输**：基于 Arrow 列式内存格式，实现端到端的零拷贝数据传输
+- **高性能网络通信**：基于 gRPC 和 HTTP/2 协议，支持多路复用和流式传输
 - **策略驱动**：通过配置文件定义数据同步任务，支持灵活的同步策略
 - **流量控制**：支持全局和任务级别的速率限制，防止对源系统造成压力
 - **并发控制**：支持多工作单元并发同步，提高同步效率
@@ -17,6 +20,7 @@
 - **分布式协同**：支持 Kubernetes 环境下的分布式部署
 - **监控告警**：内置 Prometheus 指标和健康检查接口
 - **数据处理管道**：支持数据过滤、转换和验证
+- **压缩传输**：支持多种压缩算法 (LZ4、ZSTD、GZIP) 降低网络带宽占用
 
 ## 🏗️ 系统架构
 
@@ -24,6 +28,9 @@
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
 │   ClickHouse    │    │      ck2sr      │    │    StarRocks    │
 │   (数据源)      │───▶│   (同步服务)    │───▶│   (目标库)      │
+│                 │    │                 │    │                 │
+│ Arrow Flight    │    │ Arrow Memory    │    │ Arrow Flight    │
+│ SQL Server      │    │ Allocation      │    │ SQL Endpoint    │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
                                │
                                ▼
@@ -31,6 +38,9 @@
                     │  状态存储       │
                     │ (File/K8s CRD)  │
                     └─────────────────┘
+
+数据流: Arrow Flight SQL → Arrow Record → Arrow Flight SQL
+协议: gRPC/HTTP2 + Arrow 列式格式 + 可选压缩传输
 ```
 
 ### 核心组件
@@ -47,10 +57,12 @@
 ### 前置要求
 
 - Go 1.25.1+
-- ClickHouse 23.2.5.107+
-- StarRocks 4.0+
+- ClickHouse 23.2.5.107+ (需支持 Arrow Flight SQL)
+- StarRocks 4.0+ (需支持 Arrow Flight SQL)
 - Docker (可选)
 - Kubernetes (可选，用于分布式部署)
+
+**注意**: 确保 ClickHouse 和 StarRocks 实例已开启 Arrow Flight SQL 支持。
 
 ### 安装
 
@@ -88,13 +100,28 @@ clickhouse:
   password: ""
   database: "default"
 
+  # Arrow Flight SQL 配置
+  flight_sql_endpoint: "localhost"
+  flight_sql_port: 9090
+  use_tls: false
+  flight_timeout: "30s"
+  batch_size: 1000
+  compression_type: "lz4"  # 可选: lz4, zstd, gzip
+
 starrocks:
   host: "localhost"
   port: 9030
   username: "root"
   password: ""
   database: "test"
-  stream_load_url: "http://localhost:8030"
+
+  # Arrow Flight SQL 配置
+  flight_sql_endpoint: "localhost"
+  flight_sql_port: 9090
+  use_tls: false
+  flight_timeout: "30s"
+  batch_size: 1000
+  compression_type: "lz4"  # 可选: lz4, zstd, gzip
 
 sync_tasks:
   - task_id: "user_data_sync"
@@ -149,6 +176,82 @@ kubectl apply -f configs/k8s-deployment.yaml
 ## 📖 详细文档
 
 ### 配置说明
+
+#### Apache Arrow Flight SQL 配置
+
+ck2sr v2.0+ 采用统一的 Apache Arrow Flight SQL 协议进行数据传输，相比传统的 Stream Load 方式具有以下优势：
+
+- **高性能**: 基于列式存储格式，零拷贝数据传输
+- **标准化**: 使用 Arrow Flight SQL 标准协议，兼容性更好
+- **压缩传输**: 支持多种压缩算法降低网络开销
+- **流式处理**: 支持大数据集的流式传输
+
+##### ClickHouse Flight SQL 配置
+
+```yaml
+clickhouse:
+  # 基本数据库连接配置
+  host: "localhost"
+  port: 9000
+  username: "default"
+  password: ""
+  database: "default"
+
+  # Arrow Flight SQL 配置
+  flight_sql_endpoint: "localhost"      # Flight SQL 服务地址
+  flight_sql_port: 9090                 # Flight SQL 服务端口
+  use_tls: false                        # 是否启用 TLS 加密
+  flight_timeout: "30s"                 # Flight SQL 查询超时时间
+  batch_size: 1000                      # Arrow 批次大小
+  compression_type: "lz4"               # 压缩算法: lz4, zstd, gzip, none
+```
+
+##### StarRocks Flight SQL 配置
+
+```yaml
+starrocks:
+  # 基本数据库连接配置
+  host: "localhost"
+  port: 9030
+  username: "root"
+  password: ""
+  database: "test"
+
+  # Arrow Flight SQL 配置
+  flight_sql_endpoint: "localhost"      # Flight SQL 服务地址
+  flight_sql_port: 9090                 # Flight SQL 服务端口
+  use_tls: false                        # 是否启用 TLS 加密
+  flight_timeout: "30s"                 # Flight SQL 写入超时时间
+  batch_size: 1000                      # Arrow 批次大小
+  compression_type: "lz4"               # 压缩算法: lz4, zstd, gzip, none
+```
+
+#### 从 Stream Load 迁移到 Arrow Flight SQL
+
+如果您正在从旧版本的 ck2sr 升级，需要进行以下配置更新：
+
+1. **移除旧的 StarRocks Stream Load 配置**:
+   ```yaml
+   # 旧配置 (需要删除)
+   starrocks:
+     stream_load_url: "http://localhost:8030"
+   ```
+
+2. **添加 Arrow Flight SQL 配置**:
+   ```yaml
+   # 新配置
+   clickhouse:
+     flight_sql_endpoint: "localhost"
+     flight_sql_port: 9090
+     # ... 其他 Flight SQL 配置
+
+   starrocks:
+     flight_sql_endpoint: "localhost"
+     flight_sql_port: 9090
+     # ... 其他 Flight SQL 配置
+   ```
+
+3. **确保数据库支持**: 验证您的 ClickHouse 和 StarRocks 实例已启用 Arrow Flight SQL 支持。
 
 #### 基本配置
 
@@ -325,17 +428,44 @@ log:
 
 ### 性能调优
 
+#### Arrow Flight SQL 性能优化
+
+- **批次大小调优**: 调整 `batch_size` 平衡内存使用和传输效率
+  ```yaml
+  # 推荐配置
+  batch_size: 1000    # 小数据集
+  batch_size: 5000    # 中等数据集
+  batch_size: 10000   # 大数据集
+  ```
+
+- **压缩算法选择**: 根据网络和 CPU 资源选择合适的压缩算法
+  ```yaml
+  compression_type: "lz4"    # 高压缩速度，适合 CPU 密集场景
+  compression_type: "zstd"   # 高压缩比，适合网络带宽受限场景
+  compression_type: "gzip"   # 通用压缩，兼容性好
+  compression_type: "none"   # 无压缩，适合高速内网环境
+  ```
+
+- **Flight SQL 超时配置**: 根据数据量调整合理的超时时间
+  ```yaml
+  flight_timeout: "30s"   # 小批次数据
+  flight_timeout: "60s"   # 中等批次数据
+  flight_timeout: "120s"  # 大批次数据
+  ```
+
 #### 内存优化
 
 - 调整 `batch_size` 控制批处理大小
 - 设置合适的 `max_workers` 数量
 - 使用 `rate_limit` 控制内存使用
+- Arrow Flight SQL 自动管理内存分配和释放
 
 #### 网络优化
 
 - 配置合适的连接池大小
 - 调整读写超时时间
 - 使用 `burst_size` 控制突发流量
+- 选择合适的压缩算法降低网络传输量
 
 ## 🧪 测试
 
@@ -387,6 +517,15 @@ go test -bench=. -benchmem ./...
 
 ## 📋 版本历史
 
+- **v2.0.0** (2024-09-17)
+  - **重大更新**: 全面采用 Apache Arrow Flight SQL 协议
+  - 统一 ClickHouse 数据读取和 StarRocks 数据写入为 Arrow Flight SQL
+  - 实现零拷贝列式数据传输，显著提升性能
+  - 支持多种压缩算法 (LZ4、ZSTD、GZIP)
+  - 基于 gRPC/HTTP2 的高性能网络通信
+  - 完整的单元测试覆盖
+  - 向后兼容 Stream Load 接口
+
 - **v1.0.0** (2024-01-xx)
   - 初始版本发布
   - 支持基本的数据同步功能
@@ -401,6 +540,7 @@ go test -bench=. -benchmem ./...
 
 感谢以下开源项目的支持：
 
+- [Apache Arrow](https://arrow.apache.org/) - 内存中列式数据格式和 Flight SQL 协议
 - [ClickHouse](https://clickhouse.com/) - 高性能列式数据库
 - [StarRocks](https://www.starrocks.io/) - 高性能分析数据库
 - [Prometheus](https://prometheus.io/) - 监控系统
