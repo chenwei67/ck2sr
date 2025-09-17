@@ -14,7 +14,18 @@ starrocks:
   username: "root"
   password: ""
   database: "test"
-  stream_load_url: "http://starrocks-fe-service:8030"
+  flight_sql_endpoint: "starrocks-fe-service"
+  flight_sql_port: 9090
+  use_tls: true
+  tls_cert_file: "/etc/ssl/certs/starrocks-cert.pem"
+  tls_key_file: "/etc/ssl/private/starrocks-key.pem"
+  tls_ca_file: "/etc/ssl/certs/ca-cert.pem"
+  flight_timeout: "60s"
+  batch_size: 20000
+  compression_type: "zstd"
+  max_idle_conns: 20
+  max_open_conns: 200
+  conn_max_lifetime: "2h"
 
 global_concurrency:
   max_workers: 5

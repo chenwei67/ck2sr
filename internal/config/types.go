@@ -29,12 +29,24 @@ type ClickHouseConfig struct {
 // StarRocks 特定配置
 type StarRocksConfig struct {
 	DatabaseConfig `yaml:",inline" mapstructure:",squash"`
-	// StarRocks Stream Load 配置
-	StreamLoadURL   string            `yaml:"stream_load_url" mapstructure:"stream_load_url"`
-	StreamLoadProps map[string]string `yaml:"stream_load_props" mapstructure:"stream_load_props"`
-	MaxIdleConns    int               `yaml:"max_idle_conns" mapstructure:"max_idle_conns"`
-	MaxOpenConns    int               `yaml:"max_open_conns" mapstructure:"max_open_conns"`
-	ConnMaxLifetime time.Duration     `yaml:"conn_max_lifetime" mapstructure:"conn_max_lifetime"`
+
+	// Flight SQL 配置
+	FlightSQLEndpoint string `yaml:"flight_sql_endpoint" mapstructure:"flight_sql_endpoint"` // Flight SQL 服务端点
+	FlightSQLPort     int    `yaml:"flight_sql_port" mapstructure:"flight_sql_port"`         // Flight SQL 端口 (默认 9090)
+	UseTLS           bool   `yaml:"use_tls" mapstructure:"use_tls"`                         // 是否使用 TLS
+	TLSCertFile      string `yaml:"tls_cert_file" mapstructure:"tls_cert_file"`             // TLS 证书文件
+	TLSKeyFile       string `yaml:"tls_key_file" mapstructure:"tls_key_file"`               // TLS 密钥文件
+	TLSCAFile        string `yaml:"tls_ca_file" mapstructure:"tls_ca_file"`                 // TLS CA 文件
+
+	// Arrow Flight 配置
+	FlightTimeout    time.Duration `yaml:"flight_timeout" mapstructure:"flight_timeout"`       // Flight 超时时间
+	BatchSize        int           `yaml:"batch_size" mapstructure:"batch_size"`               // Arrow 批次大小
+	CompressionType  string        `yaml:"compression_type" mapstructure:"compression_type"`   // 压缩类型 (none, gzip, lz4, zstd)
+
+	// 连接池配置
+	MaxIdleConns    int           `yaml:"max_idle_conns" mapstructure:"max_idle_conns"`
+	MaxOpenConns    int           `yaml:"max_open_conns" mapstructure:"max_open_conns"`
+	ConnMaxLifetime time.Duration `yaml:"conn_max_lifetime" mapstructure:"conn_max_lifetime"`
 }
 
 // 时间窗口配置
@@ -174,15 +186,15 @@ func DefaultConfig() *Config {
 			DatabaseConfig: DatabaseConfig{
 				Port: 9030,
 			},
-			StreamLoadProps: map[string]string{
-				"format":            "CSV",
-				"column_separator":  ",",
-				"row_delimiter":     "\n",
-				"max_filter_ratio":  "0.1",
-			},
-			MaxIdleConns:    10,
-			MaxOpenConns:    100,
-			ConnMaxLifetime: time.Hour,
+			FlightSQLEndpoint: "localhost",
+			FlightSQLPort:     9090,
+			UseTLS:           false,
+			FlightTimeout:    30 * time.Second,
+			BatchSize:        10000,
+			CompressionType:  "lz4",
+			MaxIdleConns:     10,
+			MaxOpenConns:     100,
+			ConnMaxLifetime:  time.Hour,
 		},
 		GlobalRateLimit: RateLimitConfig{
 			MaxBytesPerSecond: 100 * 1024 * 1024, // 100MB/s

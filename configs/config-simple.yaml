@@ -14,7 +14,12 @@ starrocks:
   username: "root"
   password: ""
   database: "test"
-  stream_load_url: "http://starrocks-fe:8030"
+  flight_sql_endpoint: "starrocks-fe"
+  flight_sql_port: 9090
+  use_tls: false
+  flight_timeout: "30s"
+  batch_size: 5000
+  compression_type: "lz4"
 
 global_rate_limit:
   max_bytes_per_second: 10485760  # 10MB/s

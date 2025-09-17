@@ -22,12 +22,21 @@ starrocks:
   username: "root"
   password: ""
   database: "test"
-  stream_load_url: "http://localhost:8030"
-  stream_load_props:
-    format: "CSV"
-    column_separator: ","
-    row_delimiter: "\n"
-    max_filter_ratio: "0.1"
+
+  # Flight SQL 配置
+  flight_sql_endpoint: "localhost"
+  flight_sql_port: 9090
+  use_tls: false
+  tls_cert_file: ""
+  tls_key_file: ""
+  tls_ca_file: ""
+
+  # Arrow Flight 配置
+  flight_timeout: "30s"
+  batch_size: 10000
+  compression_type: "lz4"  # none, gzip, lz4, zstd
+
+  # 连接池配置
   max_idle_conns: 10
   max_open_conns: 100
   conn_max_lifetime: "1h"
