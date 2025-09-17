@@ -1,0 +1,72 @@
+# Kubernetes 环境配置
+# 启用 K8s CRD 存储和分布式部署
+
+clickhouse:
+  host: "clickhouse-service"
+  port: 9000
+  username: "default"
+  password: ""
+  database: "default"
+
+starrocks:
+  host: "starrocks-fe-service"
+  port: 9030
+  username: "root"
+  password: ""
+  database: "test"
+  stream_load_url: "http://starrocks-fe-service:8030"
+
+global_concurrency:
+  max_workers: 5
+  max_concurrent_tasks: 3
+  batch_size: 5000
+
+sync_tasks:
+  - task_id: "production_sync"
+    name: "生产环境数据同步"
+    description: "生产环境数据同步任务"
+    enabled: true
+    source_table: "events"
+    target_table: "events_sync"
+
+    data_range:
+      time_column: "timestamp"
+      where: "event_type IN ('click', 'view', 'purchase')"
+
+    time_window:
+      start_time: "02:00"
+      end_time: "06:00"
+
+    rate_limit:
+      max_bytes_per_second: 52428800  # 50MB/s
+      max_rows_per_second: 50000
+
+    validate:
+      enabled: true
+      check_row_count: true
+      check_checksum: true
+      tolerance_percent: 1.0
+
+    cron_expression: "0 3 * * *"
+
+monitor:
+  enabled: true
+  metrics_port: 8080
+  health_check_port: 8081
+
+# 启用 Kubernetes 集成
+kubernetes:
+  enabled: true
+  namespace: "ck2sr"
+  configmap_name: "ck2sr-config"
+  crd_name: "ck2sr-tasks"
+  label_selector: "app=ck2sr"
+
+log:
+  level: "info"
+  format: "json"
+  output: "stdout"
+
+storage_path: "/data"
+heartbeat_interval: "30s"
+graceful_shutdown_timeout: "60s"

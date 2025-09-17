@@ -1,0 +1,188 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ck2sr
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ck2sr-config
+  namespace: ck2sr
+data:
+  config.yaml: |
+    clickhouse:
+      host: "clickhouse-service"
+      port: 9000
+      username: "default"
+      password: ""
+      database: "default"
+
+    starrocks:
+      host: "starrocks-fe-service"
+      port: 9030
+      username: "root"
+      password: ""
+      database: "test"
+      stream_load_url: "http://starrocks-fe-service:8030"
+
+    global_concurrency:
+      max_workers: 5
+      max_concurrent_tasks: 3
+      batch_size: 5000
+
+    sync_tasks:
+      - task_id: "k8s_sync_task"
+        name: "Kubernetes 同步任务"
+        description: "在 Kubernetes 环境中运行的同步任务"
+        enabled: true
+        source_table: "events"
+        target_table: "events_sync"
+
+        validate:
+          enabled: true
+          check_row_count: true
+          tolerance_percent: 1.0
+
+    monitor:
+      enabled: true
+      metrics_port: 8080
+      health_check_port: 8081
+
+    kubernetes:
+      enabled: true
+      namespace: "ck2sr"
+      configmap_name: "ck2sr-config"
+      crd_name: "ck2sr-tasks"
+
+    log:
+      level: "info"
+      format: "json"
+      output: "stdout"
+
+    storage_path: "/data"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ck2sr
+  namespace: ck2sr
+  labels:
+    app: ck2sr
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ck2sr
+  template:
+    metadata:
+      labels:
+        app: ck2sr
+    spec:
+      containers:
+      - name: ck2sr
+        image: ck2sr:latest
+        imagePullPolicy: IfNotPresent
+        args:
+          - "-config"
+          - "/etc/ck2sr/config.yaml"
+        ports:
+        - containerPort: 8080
+          name: metrics
+        - containerPort: 8081
+          name: health
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        volumeMounts:
+        - name: config
+          mountPath: /etc/ck2sr
+          readOnly: true
+        - name: data
+          mountPath: /data
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8081
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8081
+          initialDelaySeconds: 5
+          periodSeconds: 10
+          timeoutSeconds: 5
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: config
+        configMap:
+          name: ck2sr-config
+      - name: data
+        emptyDir: {}
+      serviceAccountName: ck2sr
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ck2sr-service
+  namespace: ck2sr
+  labels:
+    app: ck2sr
+spec:
+  selector:
+    app: ck2sr
+  ports:
+  - name: metrics
+    port: 8080
+    targetPort: 8080
+  - name: health
+    port: 8081
+    targetPort: 8081
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ck2sr
+  namespace: ck2sr
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: ck2sr
+rules:
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["apiextensions.k8s.io"]
+  resources: ["customresourcedefinitions"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+- apiGroups: ["ck2sr.io"]
+  resources: ["synctasks"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: ck2sr
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: ck2sr
+subjects:
+- kind: ServiceAccount
+  name: ck2sr
+  namespace: ck2sr

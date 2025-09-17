@@ -1,0 +1,52 @@
+# 简化配置示例
+# 用于快速启动和测试
+
+clickhouse:
+  host: "clickhouse"
+  port: 9000
+  username: "default"
+  password: ""
+  database: "default"
+
+starrocks:
+  host: "starrocks-fe"
+  port: 9030
+  username: "root"
+  password: ""
+  database: "test"
+  stream_load_url: "http://starrocks-fe:8030"
+
+global_rate_limit:
+  max_bytes_per_second: 10485760  # 10MB/s
+  max_rows_per_second: 10000
+
+global_concurrency:
+  max_workers: 2
+  max_concurrent_tasks: 1
+  batch_size: 1000
+
+sync_tasks:
+  - task_id: "test_sync"
+    name: "测试同步任务"
+    description: "用于测试的简单同步任务"
+    enabled: true
+    source_table: "test_table"
+    target_table: "test_table_sync"
+
+    validate:
+      enabled: true
+      check_row_count: true
+      check_checksum: false
+      tolerance_percent: 5.0
+
+monitor:
+  enabled: true
+  metrics_port: 8080
+  health_check_port: 8081
+
+log:
+  level: "info"
+  format: "json"
+  output: "stdout"
+
+storage_path: "/data"

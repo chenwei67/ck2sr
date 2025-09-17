@@ -1,0 +1,169 @@
+# ck2sr 配置文件示例
+# ClickHouse 到 StarRocks 数据同步服务配置
+
+# ClickHouse 数据库配置
+clickhouse:
+  host: "localhost"
+  port: 9000
+  username: "default"
+  password: ""
+  database: "default"
+  max_block_size: 100000
+  read_timeout: "30s"
+  write_timeout: "30s"
+  max_idle_conns: 10
+  max_open_conns: 100
+  conn_max_lifetime: "1h"
+
+# StarRocks 数据库配置
+starrocks:
+  host: "localhost"
+  port: 9030
+  username: "root"
+  password: ""
+  database: "test"
+  stream_load_url: "http://localhost:8030"
+  stream_load_props:
+    format: "CSV"
+    column_separator: ","
+    row_delimiter: "\n"
+    max_filter_ratio: "0.1"
+  max_idle_conns: 10
+  max_open_conns: 100
+  conn_max_lifetime: "1h"
+
+# 全局流量控制配置
+global_rate_limit:
+  max_bytes_per_second: 104857600  # 100MB/s
+  max_rows_per_second: 100000
+  burst_size: 1000
+
+# 全局并发控制配置
+global_concurrency:
+  max_workers: 10
+  max_concurrent_tasks: 5
+  batch_size: 10000
+
+# 全局重试配置
+global_retry:
+  max_retries: 3
+  initial_delay: "1s"
+  max_delay: "30s"
+  backoff_factor: 2.0
+
+# 同步任务配置
+sync_tasks:
+  - task_id: "user_data_sync"
+    name: "用户数据同步"
+    description: "同步用户表数据从 ClickHouse 到 StarRocks"
+    enabled: true
+    source_table: "users"
+    target_table: "users_sync"
+
+    # 数据范围配置
+    data_range:
+      time_column: "created_at"
+      start_time: "2023-01-01 00:00:00"
+      # end_time: "2023-12-31 23:59:59"  # 可选，不设置表示同步到当前时间
+      where: "status = 'active'"
+
+    # 时间窗口限制（仅在指定时间段内运行）
+    time_window:
+      start_time: "01:00"
+      end_time: "05:00"
+
+    # 流量控制（任务级别，会覆盖全局配置）
+    rate_limit:
+      max_bytes_per_second: 52428800  # 50MB/s
+      max_rows_per_second: 50000
+      burst_size: 500
+
+    # 并发控制
+    concurrency:
+      max_workers: 5
+      batch_size: 5000
+
+    # 重试配置
+    retry:
+      max_retries: 5
+      initial_delay: "2s"
+      max_delay: "60s"
+      backoff_factor: 2.0
+
+    # 数据完整性验证
+    validate:
+      enabled: true
+      check_row_count: true
+      check_checksum: true
+      check_columns: ["id", "username", "email"]
+      tolerance_percent: 1.0
+
+    # 列映射（源列名 -> 目标列名）
+    column_mapping:
+      user_id: "id"
+      user_name: "username"
+      email_address: "email"
+      create_time: "created_at"
+
+    # 任务优先级
+    priority: 1
+
+    # Cron 表达式（可选，用于定时任务）
+    cron_expression: "0 2 * * *"  # 每天凌晨 2 点执行
+
+  - task_id: "order_data_sync"
+    name: "订单数据同步"
+    description: "同步订单表数据"
+    enabled: true
+    source_table: "orders"
+    target_table: "orders_sync"
+
+    data_range:
+      time_column: "order_date"
+      where: "status IN ('completed', 'paid')"
+
+    # 仅在工作日运行
+    time_window:
+      start_time: "02:00"
+      end_time: "06:00"
+
+    validate:
+      enabled: true
+      check_row_count: true
+      check_checksum: false
+      tolerance_percent: 0.5
+
+    priority: 2
+    cron_expression: "0 3 * * 1-5"  # 工作日凌晨 3 点执行
+
+# 监控配置
+monitor:
+  enabled: true
+  metrics_port: 8080
+  metrics_path: "/metrics"
+  update_interval: "10s"
+  health_check_port: 8081
+
+# Kubernetes 配置
+kubernetes:
+  enabled: false
+  namespace: "default"
+  configmap_name: "ck2sr-config"
+  crd_name: "ck2sr-tasks"
+  label_selector: "app=ck2sr"
+  pod_name: ""
+
+# 日志配置
+log:
+  level: "info"          # debug, info, warn, error
+  format: "json"         # json, text
+  output: "stdout"       # stdout, file
+  file_path: "/var/log/ck2sr/ck2sr.log"
+  max_size: 100          # MB
+  max_backups: 10
+  max_age: 30            # days
+
+# 其他配置
+storage_path: "./data"
+heartbeat_interval: "30s"
+graceful_shutdown_timeout: "30s"

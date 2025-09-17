@@ -1,0 +1,134 @@
+version: '3.8'
+
+services:
+  # ClickHouse 服务
+  clickhouse:
+    image: clickhouse/clickhouse-server:23.8
+    container_name: ck2sr-clickhouse
+    hostname: clickhouse
+    ports:
+      - "9000:9000"
+      - "8123:8123"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./docker/clickhouse/config.xml:/etc/clickhouse-server/config.xml
+      - ./docker/clickhouse/users.xml:/etc/clickhouse-server/users.xml
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    networks:
+      - ck2sr
+
+  # StarRocks FE 服务
+  starrocks-fe:
+    image: starrocks/fe-ubuntu:3.0-latest
+    container_name: ck2sr-starrocks-fe
+    hostname: starrocks-fe
+    ports:
+      - "8030:8030"
+      - "9030:9030"
+    volumes:
+      - starrocks_fe_data:/opt/starrocks/fe/meta
+      - ./docker/starrocks/fe.conf:/opt/starrocks/fe/conf/fe.conf
+    environment:
+      HOST_TYPE: FQDN
+    networks:
+      - ck2sr
+
+  # StarRocks BE 服务
+  starrocks-be:
+    image: starrocks/be-ubuntu:3.0-latest
+    container_name: ck2sr-starrocks-be
+    hostname: starrocks-be
+    ports:
+      - "8040:8040"
+    volumes:
+      - starrocks_be_data:/opt/starrocks/be/storage
+      - ./docker/starrocks/be.conf:/opt/starrocks/be/conf/be.conf
+    environment:
+      HOST_TYPE: FQDN
+    depends_on:
+      - starrocks-fe
+    networks:
+      - ck2sr
+
+  # ck2sr 同步服务
+  ck2sr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ck2sr-service
+    hostname: ck2sr
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    volumes:
+      - ck2sr_data:/data
+      - ./configs/config-simple.yaml:/app/configs/config.yaml:ro
+    environment:
+      - CONFIG_FILE=/app/configs/config.yaml
+    depends_on:
+      - clickhouse
+      - starrocks-fe
+      - starrocks-be
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - ck2sr
+
+  # Prometheus 监控
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: ck2sr-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - ck2sr
+
+  # Grafana 可视化
+  grafana:
+    image: grafana/grafana:latest
+    container_name: ck2sr-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    networks:
+      - ck2sr
+
+networks:
+  ck2sr:
+    driver: bridge
+
+volumes:
+  clickhouse_data:
+  starrocks_fe_data:
+  starrocks_be_data:
+  ck2sr_data:
+  prometheus_data:
+  grafana_data:
