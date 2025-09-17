@@ -34,11 +34,6 @@ func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, er
 			Username: cfg.Username,
 			Password: cfg.Password,
 		},
-		ClientInfo: clickhouse.ClientInfo{
-			Products: []clickhouse.Product{
-				{Name: "ck2sr", Version: "1.0.0"},
-			},
-		},
 		Debugf: func(format string, v ...interface{}) {
 			logger.Debugf("[ClickHouse] "+format, v...)
 		},
@@ -50,7 +45,6 @@ func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, er
 		ConnMaxLifetime: cfg.ConnMaxLifetime,
 		DialTimeout:     30 * time.Second,
 		ReadTimeout:     cfg.ReadTimeout,
-		WriteTimeout:    cfg.WriteTimeout,
 	}
 
 	// 建立连接

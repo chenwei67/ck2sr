@@ -146,6 +146,9 @@ type Storage interface {
 
 	// 关闭存储
 	Close() error
+
+	// 健康检查
+	HealthCheck(ctx context.Context) error
 }
 
 // StorageConfig 存储配置

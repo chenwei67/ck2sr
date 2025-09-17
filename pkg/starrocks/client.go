@@ -1,7 +1,6 @@
 package starrocks
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"database/sql"
@@ -9,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"

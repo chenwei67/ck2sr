@@ -3,8 +3,6 @@ package config
 import (
 	"fmt"
 	"time"
-
-	"github.com/spf13/viper"
 )
 
 // 数据库配置

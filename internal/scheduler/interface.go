@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/ck2sr/ck2sr/internal/config"
-	"github.com/ck2sr/ck2sr/internal/worker"
 )
 
 // ScheduleType 调度类型

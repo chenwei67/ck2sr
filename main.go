@@ -111,7 +111,7 @@ func NewApplication() (*Application, error) {
 
 	// 创建存储
 	storageFactory := storage.NewStorageFactory(logger)
-	storageType := storage.StorageType(cfg.Kubernetes.Enabled)
+	var storageType storage.StorageType
 	if cfg.Kubernetes.Enabled {
 		storageType = storage.StorageTypeK8s
 	} else {

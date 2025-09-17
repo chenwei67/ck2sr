@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,6 +63,24 @@ func (fs *FileStorage) Close() error {
 	return nil
 }
 
+// HealthCheck 健康检查
+func (fs *FileStorage) HealthCheck(ctx context.Context) error {
+	// 检查基础路径是否可访问
+	if _, err := os.Stat(fs.basePath); os.IsNotExist(err) {
+		return fmt.Errorf("storage base path does not exist: %s", fs.basePath)
+	}
+
+	// 检查是否可写
+	testFile := filepath.Join(fs.basePath, ".health_check")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		return fmt.Errorf("storage path is not writable: %w", err)
+	}
+
+	// 清理测试文件
+	os.Remove(testFile)
+	return nil
+}
+
 // SaveTaskState 保存任务状态
 func (fs *FileStorage) SaveTaskState(ctx context.Context, state *TaskState) error {
 	fs.mutex.Lock()
@@ -106,7 +123,7 @@ func (fs *FileStorage) GetAllTaskStates(ctx context.Context) ([]*TaskState, erro
 	taskDir := filepath.Join(fs.basePath, "tasks")
 	var states []*TaskState
 
-	err := filepath.WalkDir(taskDir, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(taskDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -179,7 +196,7 @@ func (fs *FileStorage) CleanupExpiredTasks(ctx context.Context, expireTime time.
 	taskDir := filepath.Join(fs.basePath, "tasks")
 
 	var deletedCount int
-	err := filepath.WalkDir(taskDir, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(taskDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -369,25 +386,6 @@ func (fs *FileStorage) loadJSON(filePath string, data interface{}) error {
 	if err := decoder.Decode(data); err != nil {
 		return fmt.Errorf("failed to decode JSON: %w", err)
 	}
-
-	return nil
-}
-
-// HealthCheck 健康检查
-func (fs *FileStorage) HealthCheck(ctx context.Context) error {
-	// 检查存储目录是否可访问
-	if _, err := os.Stat(fs.basePath); err != nil {
-		return fmt.Errorf("storage directory not accessible: %w", err)
-	}
-
-	// 尝试写入测试文件
-	testFile := filepath.Join(fs.basePath, ".health_check")
-	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
-		return fmt.Errorf("cannot write to storage directory: %w", err)
-	}
-
-	// 删除测试文件
-	os.Remove(testFile)
 
 	return nil
 }

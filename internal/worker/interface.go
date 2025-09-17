@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/ck2sr/ck2sr/internal/config"
-	"github.com/ck2sr/ck2sr/internal/pipeline"
 	"github.com/ck2sr/ck2sr/internal/storage"
 )
 
@@ -190,6 +189,12 @@ type TaskManager interface {
 
 	// UpdateProgress 更新所有任务进度
 	UpdateProgress() error
+
+	// StartScheduledTasks 启动定时任务
+	StartScheduledTasks(ctx context.Context) error
+
+	// HealthCheck 健康检查
+	HealthCheck(ctx context.Context) error
 
 	// Shutdown 关闭管理器
 	Shutdown(ctx context.Context) error

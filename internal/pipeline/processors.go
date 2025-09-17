@@ -394,6 +394,20 @@ func (p *DataValidatorProcessor) Configure(config *ProcessorConfig) error {
 	return nil
 }
 
+// Validate 验证配置
+func (p *DataValidatorProcessor) Validate() error {
+	if err := p.BaseProcessor.Validate(); err != nil {
+		return err
+	}
+	// 验证规则是否有效
+	for _, rule := range p.rules {
+		if rule.Column == "" {
+			return fmt.Errorf("validation rule missing column name")
+		}
+	}
+	return nil
+}
+
 // Process 处理数据批次
 func (p *DataValidatorProcessor) Process(ctx context.Context, batch DataBatch) (DataBatch, error) {
 	if len(p.rules) == 0 {
@@ -401,7 +415,7 @@ func (p *DataValidatorProcessor) Process(ctx context.Context, batch DataBatch) (
 	}
 
 	for _, row := range batch.GetRows() {
-		if err := p.Validate(ctx, row); err != nil {
+		if err := p.ValidateRow(ctx, row); err != nil {
 			return nil, fmt.Errorf("data validation failed: %w", err)
 		}
 	}
@@ -409,8 +423,8 @@ func (p *DataValidatorProcessor) Process(ctx context.Context, batch DataBatch) (
 	return batch, nil
 }
 
-// Validate 验证数据行
-func (p *DataValidatorProcessor) Validate(ctx context.Context, row DataRow) error {
+// ValidateRow 验证数据行
+func (p *DataValidatorProcessor) ValidateRow(ctx context.Context, row DataRow) error {
 	for _, rule := range p.rules {
 		if err := p.validateField(row, rule); err != nil {
 			return fmt.Errorf("column %s: %w", rule.Column, err)
@@ -544,6 +558,42 @@ func (p *DataValidatorProcessor) validatePattern(value interface{}, regex *regex
 		return fmt.Errorf("value does not match pattern")
 	}
 	return nil
+}
+
+// toFloat64 将值转换为 float64
+func (p *DataValidatorProcessor) toFloat64(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case string:
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
+// valueToString 将值转换为字符串
+func (p *DataValidatorProcessor) valueToString(value interface{}) string {
+	if value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return v
+	case fmt.Stringer:
+		return v.String()
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 // 辅助函数

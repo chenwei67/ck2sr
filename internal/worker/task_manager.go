@@ -75,7 +75,7 @@ func (tm *TaskManagerImpl) CreateTask(taskConfig *config.SyncTaskConfig) (SyncTa
 	}
 
 	// 创建数据处理管道
-	pipeline := pipeline.NewSimplePipeline(tm.logger)
+	syncPipeline := pipeline.NewSimplePipeline(tm.logger)
 
 	// 配置处理器（如果有的话）
 	// 这里可以根据任务配置创建列映射、数据过滤等处理器
@@ -96,7 +96,7 @@ func (tm *TaskManagerImpl) CreateTask(taskConfig *config.SyncTaskConfig) (SyncTa
 			return nil, fmt.Errorf("failed to configure column mapping processor: %w", err)
 		}
 
-		if err := pipeline.AddProcessor(processor); err != nil {
+		if err := syncPipeline.AddProcessor(processor); err != nil {
 			return nil, fmt.Errorf("failed to add column mapping processor: %w", err)
 		}
 	}
@@ -106,7 +106,7 @@ func (tm *TaskManagerImpl) CreateTask(taskConfig *config.SyncTaskConfig) (SyncTa
 		taskConfig,
 		tm.chClient,
 		tm.srClient,
-		pipeline,
+		syncPipeline,
 		tm.storage,
 		tm.logger,
 	)

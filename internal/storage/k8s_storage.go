@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -90,6 +89,16 @@ func (ks *K8sStorage) Initialize(ctx context.Context) error {
 // Close 关闭存储
 func (ks *K8sStorage) Close() error {
 	// Kubernetes 客户端无需特殊关闭操作
+	return nil
+}
+
+// HealthCheck 健康检查
+func (ks *K8sStorage) HealthCheck(ctx context.Context) error {
+	// 检查与 Kubernetes API 的连接
+	_, err := ks.client.Resource(ks.gvr).Namespace(ks.namespace).List(ctx, metav1.ListOptions{Limit: 1})
+	if err != nil {
+		return fmt.Errorf("kubernetes API is not accessible: %w", err)
+	}
 	return nil
 }
 
@@ -401,14 +410,4 @@ func (ks *K8sStorage) getResourceName(taskID string) string {
 	// 将任务 ID 转换为合法的资源名称
 	resourceName := fmt.Sprintf("ck2sr-%s", taskID)
 	return resourceName
-}
-
-// HealthCheck 健康检查
-func (ks *K8sStorage) HealthCheck(ctx context.Context) error {
-	// 尝试列出资源以验证连接
-	_, err := ks.client.Resource(ks.gvr).Namespace(ks.namespace).List(ctx, metav1.ListOptions{Limit: 1})
-	if err != nil {
-		return fmt.Errorf("kubernetes storage health check failed: %w", err)
-	}
-	return nil
 }

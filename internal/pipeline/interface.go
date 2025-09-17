@@ -106,8 +106,8 @@ type Transformer interface {
 type Validator interface {
 	Processor
 
-	// Validate 验证数据行
-	Validate(ctx context.Context, row DataRow) error
+	// ValidateRow 验证数据行
+	ValidateRow(ctx context.Context, row DataRow) error
 }
 
 // Pipeline 数据处理管道接口

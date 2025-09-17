@@ -43,7 +43,7 @@ func NewSyncTask(
 	chClient *clickhouse.Client,
 	srClient *starrocks.Client,
 	pipeline pipeline.Pipeline,
-	storage storage.Storage,
+	storageInstance storage.Storage,
 	logger *logrus.Logger,
 ) *SyncTaskImpl {
 	if logger == nil {
@@ -55,7 +55,7 @@ func NewSyncTask(
 		config:   taskConfig,
 		workers:  make(map[string]Worker),
 		status:   storage.TaskStatusPending,
-		storage:  storage,
+		storage:  storageInstance,
 		logger:   logger,
 		chClient: chClient,
 		srClient: srClient,

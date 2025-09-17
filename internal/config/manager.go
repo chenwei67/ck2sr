@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/spf13/viper"
 )
 
@@ -157,7 +158,7 @@ func (m *Manager) Reload() error {
 // 监听配置文件变化
 func (m *Manager) WatchConfig(callback func()) {
 	m.viper.WatchConfig()
-	m.viper.OnConfigChange(func(e interface{}) {
+	m.viper.OnConfigChange(func(e fsnotify.Event) {
 		if err := m.Reload(); err == nil && callback != nil {
 			callback()
 		}
