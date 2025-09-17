@@ -3,9 +3,12 @@ package clickhouse
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"database/sql"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"strings"
 	"time"
 
@@ -42,8 +45,13 @@ func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, er
 	allocator := memory.NewGoAllocator()
 
 	// 建立SQL连接用于元数据查询
-	dsn := fmt.Sprintf("tcp://%s:%d?database=%s&username=%s&password=%s",
-		cfg.Host, cfg.Port, cfg.Database, cfg.Username, cfg.Password)
+	dsn := fmt.Sprintf("tcp://%s:%d?database=%s", cfg.Host, cfg.Port, cfg.Database)
+	if cfg.Username != "" {
+		dsn += fmt.Sprintf("&username=%s", cfg.Username)
+	}
+	if cfg.Password != "" {
+		dsn += fmt.Sprintf("&password=%s", cfg.Password)
+	}
 	db, err := sql.Open("clickhouse", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open ClickHouse database connection: %w", err)
@@ -57,6 +65,15 @@ func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, er
 	// 测试SQL连接
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	logger.Infof("Attempting to connect to ClickHouse - Host: %s, Port: %d, Database: %s, User: %s",
+		cfg.Host, cfg.Port, cfg.Database, func() string {
+			if cfg.Username == "" {
+				return "<empty>"
+			}
+			return cfg.Username
+		}())
+
 	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to ping ClickHouse: %w", err)
@@ -66,7 +83,36 @@ func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, er
 	flightEndpoint := fmt.Sprintf("%s:%d", cfg.FlightSQLEndpoint, cfg.FlightSQLPort)
 	var creds credentials.TransportCredentials
 	if cfg.UseTLS {
-		creds = credentials.NewTLS(nil)
+		tlsConfig := &tls.Config{
+			ServerName: cfg.FlightSQLEndpoint,
+		}
+
+		// 加载客户端证书
+		if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+			cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+			if err != nil {
+				db.Close()
+				return nil, fmt.Errorf("failed to load client certificate: %w", err)
+			}
+			tlsConfig.Certificates = []tls.Certificate{cert}
+		}
+
+		// 加载 CA 证书
+		if cfg.TLSCAFile != "" {
+			caCert, err := ioutil.ReadFile(cfg.TLSCAFile)
+			if err != nil {
+				db.Close()
+				return nil, fmt.Errorf("failed to read CA certificate: %w", err)
+			}
+			caCertPool := x509.NewCertPool()
+			if !caCertPool.AppendCertsFromPEM(caCert) {
+				db.Close()
+				return nil, fmt.Errorf("failed to parse CA certificate")
+			}
+			tlsConfig.RootCAs = caCertPool
+		}
+
+		creds = credentials.NewTLS(tlsConfig)
 	} else {
 		creds = insecure.NewCredentials()
 	}
@@ -78,7 +124,9 @@ func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, er
 	}
 
 	flightClient := flight.NewClientFromConn(conn, nil)
-	sqlClient, err := flightsql.NewClient(flightEndpoint, nil, nil)
+
+	// 创建 Flight SQL 客户端
+	sqlClient, err := flightsql.NewClient(flightEndpoint, nil, nil, grpc.WithTransportCredentials(creds))
 	if err != nil {
 		conn.Close()
 		db.Close()
