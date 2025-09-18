@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -526,8 +527,11 @@ func (w *SyncWorker) processBatch(offset, batchSize int64) (int64, error) {
 
 // writeArrowToTarget 直接写入Arrow数据到目标数据库
 func (w *SyncWorker) writeArrowToTarget(record arrow.Record) error {
-	// 使用StarRocks的Arrow Flight SQL写入器
-	writer, err := w.srClient.NewArrowDataWriter(w.taskConfig.TargetTable, w.taskConfig.Concurrency.BatchSize)
+	// 生成目标表名（添加_ck2sr后缀）
+	targetTableName := w.generateTargetTableName(w.taskConfig.TargetTable)
+
+	// 使用StarRocks的Arrow Flight SQL写入器，支持自动建表
+	writer, err := w.srClient.NewArrowDataWriterWithAutoCreate(targetTableName, w.taskConfig.Concurrency.BatchSize, record.Schema())
 	if err != nil {
 		return fmt.Errorf("failed to create Arrow data writer: %w", err)
 	}
@@ -542,8 +546,24 @@ func (w *SyncWorker) writeArrowToTarget(record arrow.Record) error {
 		return fmt.Errorf("Arrow Flight SQL write failed: %w", err)
 	}
 
-	w.logger.Debugf("Arrow Flight SQL write completed: %d rows", record.NumRows())
+	w.logger.Debugf("Arrow Flight SQL write completed: %d rows to table %s", record.NumRows(), targetTableName)
 	return nil
+}
+
+// generateTargetTableName 生成目标表名，如果配置中的目标表名没有_ck2sr后缀则添加
+func (w *SyncWorker) generateTargetTableName(configuredTableName string) string {
+	// 如果配置中已经指定了完整的目标表名（包含_ck2sr后缀），则直接使用
+	if strings.HasSuffix(configuredTableName, "_ck2sr") {
+		return configuredTableName
+	}
+
+	// 如果配置中指定的是源表名，则根据源表名生成目标表名
+	if configuredTableName == w.taskConfig.SourceTable {
+		return w.taskConfig.SourceTable + "_ck2sr"
+	}
+
+	// 如果配置中指定了自定义目标表名，但没有_ck2sr后缀，则添加后缀
+	return configuredTableName + "_ck2sr"
 }
 
 // writeToTarget 写入目标数据库（保留向后兼容）

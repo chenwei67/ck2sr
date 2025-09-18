@@ -409,10 +409,33 @@ type ArrowWriteResult struct {
 
 // NewArrowDataWriter 创建 Arrow 数据写入器
 func (c *Client) NewArrowDataWriter(tableName string, batchSize int) (*ArrowDataWriter, error) {
+	return c.NewArrowDataWriterWithAutoCreate(tableName, batchSize, nil)
+}
+
+// NewArrowDataWriterWithAutoCreate 创建 Arrow 数据写入器，支持自动建表
+func (c *Client) NewArrowDataWriterWithAutoCreate(tableName string, batchSize int, sourceSchema *arrow.Schema) (*ArrowDataWriter, error) {
 	// 从 StarRocks 获取表结构
 	tableInfo, err := c.GetTableInfo(context.Background(), tableName)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get table info: %w", err)
+		// 检查是否是表不存在的错误
+		if strings.Contains(err.Error(), "not found") && sourceSchema != nil {
+			c.logger.Infof("Table %s not found, attempting to create it automatically", tableName)
+
+			// 自动创建表
+			if createErr := c.createTableFromSchema(tableName, sourceSchema); createErr != nil {
+				return nil, fmt.Errorf("failed to auto-create table %s: %w (original error: %v)", tableName, createErr, err)
+			}
+
+			// 重新获取表信息
+			tableInfo, err = c.GetTableInfo(context.Background(), tableName)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get table info after auto-creation: %w", err)
+			}
+
+			c.logger.Infof("Successfully auto-created table %s", tableName)
+		} else {
+			return nil, fmt.Errorf("failed to get table info: %w", err)
+		}
 	}
 
 	// 转换为 Arrow Schema
@@ -852,6 +875,158 @@ func (c *Client) GetServerVersion(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to get server version: %w", err)
 	}
 	return version, nil
+}
+
+// createTableFromSchema 根据Arrow Schema自动创建StarRocks表
+func (c *Client) createTableFromSchema(tableName string, sourceSchema *arrow.Schema) error {
+	// 注意：这里的tableName已经是完整的目标表名（可能包含_ck2sr后缀）
+
+	// 构建CREATE TABLE语句
+	createSQL, err := c.buildCreateTableSQL(tableName, sourceSchema)
+	if err != nil {
+		return fmt.Errorf("failed to build CREATE TABLE SQL: %w", err)
+	}
+
+	c.logger.Infof("Creating table with SQL: %s", createSQL)
+
+	// 执行创建表语句
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	_, err = c.db.ExecContext(ctx, createSQL)
+	if err != nil {
+		return fmt.Errorf("failed to execute CREATE TABLE: %w", err)
+	}
+
+	c.logger.Infof("Successfully created table: %s", tableName)
+	return nil
+}
+
+// generateTableName 生成目标表名，添加_ck2sr后缀
+func (c *Client) generateTableName(sourceTableName string) string {
+	// 如果已经有_ck2sr后缀，就不再添加
+	if strings.HasSuffix(sourceTableName, "_ck2sr") {
+		return sourceTableName
+	}
+	return sourceTableName + "_ck2sr"
+}
+
+// buildCreateTableSQL 构建CREATE TABLE SQL语句
+func (c *Client) buildCreateTableSQL(tableName string, schema *arrow.Schema) (string, error) {
+	if schema.NumFields() == 0 {
+		return "", fmt.Errorf("schema has no fields")
+	}
+
+	var columns []string
+	var primaryKeyColumns []string
+
+	for i := 0; i < schema.NumFields(); i++ {
+		field := schema.Field(i)
+
+		// 转换Arrow类型到StarRocks类型
+		starRocksType, err := c.convertArrowTypeToStarRocks(field.Type)
+		if err != nil {
+			c.logger.Warnf("Failed to convert field %s type %s, using VARCHAR(255): %v", field.Name, field.Type, err)
+			starRocksType = "VARCHAR(255)"
+		}
+
+		// 构建列定义
+		columnDef := fmt.Sprintf("`%s` %s", field.Name, starRocksType)
+
+		// 处理NULL约束
+		if !field.Nullable {
+			columnDef += " NOT NULL"
+		}
+
+		// 检查是否可能是主键字段（ID字段且非空）
+		if !field.Nullable && (strings.ToLower(field.Name) == "id" || strings.HasSuffix(strings.ToLower(field.Name), "_id")) {
+			primaryKeyColumns = append(primaryKeyColumns, field.Name)
+		}
+
+		columns = append(columns, columnDef)
+	}
+
+	// 构建基本的CREATE TABLE语句
+	var sqlBuilder strings.Builder
+	sqlBuilder.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS `%s` (\n", tableName))
+	sqlBuilder.WriteString("  " + strings.Join(columns, ",\n  "))
+
+	// 添加主键（如果有）
+	if len(primaryKeyColumns) > 0 {
+		sqlBuilder.WriteString(",\n  PRIMARY KEY (")
+		for i, col := range primaryKeyColumns {
+			if i > 0 {
+				sqlBuilder.WriteString(", ")
+			}
+			sqlBuilder.WriteString(fmt.Sprintf("`%s`", col))
+		}
+		sqlBuilder.WriteString(")")
+	}
+
+	sqlBuilder.WriteString("\n)")
+
+	// 添加StarRocks特定的表选项
+	sqlBuilder.WriteString("\nENGINE=OLAP")
+
+	// 如果没有主键，使用DUPLICATE KEY
+	if len(primaryKeyColumns) == 0 {
+		// 使用第一个字段作为分布键
+		firstField := schema.Field(0)
+		sqlBuilder.WriteString(fmt.Sprintf("\nDUPLICATE KEY(`%s`)", firstField.Name))
+		sqlBuilder.WriteString(fmt.Sprintf("\nDISTRIBUTED BY HASH(`%s`) BUCKETS 10", firstField.Name))
+	} else {
+		// 使用主键作为分布键
+		sqlBuilder.WriteString(fmt.Sprintf("\nDISTRIBUTED BY HASH(`%s`) BUCKETS 10", primaryKeyColumns[0]))
+	}
+
+	// 添加默认属性
+	sqlBuilder.WriteString("\nPROPERTIES (\n")
+	sqlBuilder.WriteString("  \"replication_num\" = \"1\",\n")
+	sqlBuilder.WriteString("  \"storage_format\" = \"DEFAULT\",\n")
+	sqlBuilder.WriteString("  \"compression\" = \"LZ4\"\n")
+	sqlBuilder.WriteString(")")
+
+	return sqlBuilder.String(), nil
+}
+
+// convertArrowTypeToStarRocks 将Arrow数据类型转换为StarRocks数据类型
+func (c *Client) convertArrowTypeToStarRocks(arrowType arrow.DataType) (string, error) {
+	switch arrowType.ID() {
+	case arrow.BOOL:
+		return "BOOLEAN", nil
+	case arrow.INT8:
+		return "TINYINT", nil
+	case arrow.INT16:
+		return "SMALLINT", nil
+	case arrow.INT32:
+		return "INT", nil
+	case arrow.INT64:
+		return "BIGINT", nil
+	case arrow.UINT8:
+		return "SMALLINT", nil // StarRocks没有无符号类型，用更大的有符号类型
+	case arrow.UINT16:
+		return "INT", nil
+	case arrow.UINT32:
+		return "BIGINT", nil
+	case arrow.UINT64:
+		return "BIGINT", nil // 可能溢出，但StarRocks最大就是BIGINT
+	case arrow.FLOAT32:
+		return "FLOAT", nil
+	case arrow.FLOAT64:
+		return "DOUBLE", nil
+	case arrow.STRING, arrow.BINARY:
+		return "VARCHAR(65533)", nil // StarRocks VARCHAR最大长度
+	case arrow.DATE32:
+		return "DATE", nil
+	case arrow.TIMESTAMP:
+		return "DATETIME", nil
+	case arrow.DECIMAL128, arrow.DECIMAL256:
+		// 对于DECIMAL类型，使用默认精度
+		return "DECIMAL(27, 9)", nil
+	default:
+		// 对于不支持的类型，使用VARCHAR
+		return "VARCHAR(255)", fmt.Errorf("unsupported arrow type: %s", arrowType)
+	}
 }
 
 // CountRows 统计表行数
