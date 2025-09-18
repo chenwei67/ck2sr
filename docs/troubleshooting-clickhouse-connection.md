@@ -86,6 +86,93 @@ go build -o ck2sr main.go
 
 ---
 
+### 2. Unknown setting write_timeout/read_timeout 错误
+
+#### 错误现象
+
+```json
+{
+  "level": "error",
+  "msg": "Failed to initialize sync: failed to get source table info: failed to get table info: code: 115, message: Unknown setting write_timeout",
+  "time": "2025-09-18T17:17:13+08:00"
+}
+```
+
+或类似的 `read_timeout` 错误。
+
+#### 问题原因
+
+ClickHouse Go 驱动程序在连接字符串（DSN）中不支持 `write_timeout` 和 `read_timeout` 参数。这些超时应该通过 Go 的 `context.Context` 或 `sql.DB` 配置来处理，而不是在连接字符串中设置。
+
+#### 影响版本
+
+- **受影响的 ck2sr 版本**: v2.1.0 (某些版本)
+- **受影响的 ClickHouse Go 驱动**: 所有版本
+
+#### 解决方案
+
+**方案1：升级到修复版本 (推荐)**
+
+升级 ck2sr 到最新版本，该问题已在后续版本中修复。
+
+```bash
+# 从源码重新构建
+git pull origin master
+go build -o ck2sr main.go
+```
+
+**方案2：手动修复 (如果无法升级)**
+
+如果您使用的是早期版本且无法升级，可以手动修改 `pkg/clickhouse/client.go` 文件：
+
+1. 找到以下代码行：
+   ```go
+   if cfg.ReadTimeout > 0 {
+       dsn += fmt.Sprintf("&read_timeout=%s", cfg.ReadTimeout.String())
+   }
+   if cfg.WriteTimeout > 0 {
+       dsn += fmt.Sprintf("&write_timeout=%s", cfg.WriteTimeout.String())
+   }
+   ```
+
+2. 替换为：
+   ```go
+   // 注意：read_timeout 和 write_timeout 不应在DSN中设置
+   // 这些超时将通过 context 和 sql.DB 配置来处理
+   ```
+
+3. 确保在连接测试中使用了配置的超时：
+   ```go
+   // 测试连接 - 使用配置的读取超时或默认10秒
+   timeout := 10 * time.Second
+   if cfg.ReadTimeout > 0 {
+       timeout = cfg.ReadTimeout
+   }
+   ctx, cancel := context.WithTimeout(context.Background(), timeout)
+   defer cancel()
+   ```
+
+4. 重新编译：
+   ```bash
+   go build -o ck2sr main.go
+   ```
+
+#### 技术细节
+
+- **问题根因**: ClickHouse Go 驱动程序不支持在 DSN 中设置 `read_timeout` 和 `write_timeout` 参数
+- **修复方案**: 移除 DSN 中的超时参数，改为通过 context 控制查询超时
+- **超时控制**: 读取超时通过 `context.WithTimeout()` 实现，写入超时通过 Go 的 SQL 驱动机制处理
+
+#### 验证修复
+
+修复后，重新运行 ck2sr，应该不再出现 `Unknown setting write_timeout` 或 `Unknown setting read_timeout` 错误：
+
+```bash
+./ck2sr -validate -config configs/config.yaml
+```
+
+---
+
 ### 相关问题
 
 - [Frame Too Large 错误处理](troubleshooting-frame-too-large.md)

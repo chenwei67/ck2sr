@@ -47,12 +47,9 @@ func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, er
 	if cfg.MaxBlockSize > 0 {
 		dsn += fmt.Sprintf("&max_block_size=%d", cfg.MaxBlockSize)
 	}
-	if cfg.ReadTimeout > 0 {
-		dsn += fmt.Sprintf("&read_timeout=%s", cfg.ReadTimeout.String())
-	}
-	if cfg.WriteTimeout > 0 {
-		dsn += fmt.Sprintf("&write_timeout=%s", cfg.WriteTimeout.String())
-	}
+
+	// 注意：read_timeout 和 write_timeout 不应在DSN中设置
+	// 这些超时将通过 context 和 sql.DB 配置来处理
 
 	// 启用压缩和优化设置
 	if cfg.CompressionType != "none" && cfg.CompressionType != "" {
@@ -69,8 +66,12 @@ func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, er
 	db.SetMaxIdleConns(cfg.MaxIdleConns)
 	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
 
-	// 测试连接
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// 测试连接 - 使用配置的读取超时或默认10秒
+	timeout := 10 * time.Second
+	if cfg.ReadTimeout > 0 {
+		timeout = cfg.ReadTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	logger.Infof("Attempting to connect to ClickHouse - Host: %s, Port: %d, Database: %s, User: %s",
