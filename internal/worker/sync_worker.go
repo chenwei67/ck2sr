@@ -21,39 +21,39 @@ import (
 
 // SyncWorker 数据同步工作单元实现
 type SyncWorker struct {
-	id              string
-	taskID          string
-	taskConfig      *config.SyncTaskConfig
-	chClient        *clickhouse.Client
-	srClient        *starrocks.Client
-	pipeline        pipeline.Pipeline
-	storage         storage.Storage
-	logger          *logrus.Logger
-	rateLimiter     *utils.RateLimiter
-	metrics         *utils.MetricsCollector
+	id          string
+	taskID      string
+	taskConfig  *config.SyncTaskConfig
+	chClient    *clickhouse.Client
+	srClient    *starrocks.Client
+	pipeline    pipeline.Pipeline
+	storage     storage.Storage
+	logger      *logrus.Logger
+	rateLimiter *utils.RateLimiter
+	metrics     *utils.MetricsCollector
 
 	// 状态管理
-	status          WorkerStatus
-	statusMutex     sync.RWMutex
+	status      WorkerStatus
+	statusMutex sync.RWMutex
 
 	// 控制信号
-	ctx             context.Context
-	cancel          context.CancelFunc
-	pauseChan       chan struct{}
-	resumeChan      chan struct{}
+	ctx        context.Context
+	cancel     context.CancelFunc
+	pauseChan  chan struct{}
+	resumeChan chan struct{}
 
 	// 统计信息
-	stats           *WorkerStats
-	statsMutex      sync.RWMutex
+	stats      *WorkerStats
+	statsMutex sync.RWMutex
 
 	// 同步状态
-	totalRows       int64
-	totalBytes      int64
-	processedRows   int64
-	processedBytes  int64
-	errorCount      int64
-	currentOffset   int64
-	startTime       time.Time
+	totalRows      int64
+	totalBytes     int64
+	processedRows  int64
+	processedBytes int64
+	errorCount     int64
+	currentOffset  int64
+	startTime      time.Time
 }
 
 // NewSyncWorker 创建数据同步工作单元
@@ -505,7 +505,7 @@ func (w *SyncWorker) processBatch(offset, batchSize int64) (int64, error) {
 		rowCount := record.NumRows()
 		totalRowCount += rowCount
 
-		w.logger.Debugf("Processing Arrow record with %d rows", rowCount)
+		w.logger.Infof("Processing Arrow record with %d rows", rowCount)
 
 		// 直接使用Arrow Flight SQL写入StarRocks
 		if err := w.writeArrowToTarget(record); err != nil {
