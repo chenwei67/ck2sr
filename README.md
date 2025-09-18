@@ -11,6 +11,8 @@
 - **混合高性能架构**：ClickHouse 使用 TCP 连接 + ArrowStream 格式查询，StarRocks 使用 Arrow Flight SQL 写入，实现高性能列式数据传输
 - **零拷贝数据传输**：基于 Arrow 列式内存格式，实现端到端的零拷贝数据传输
 - **高性能网络通信**：基于 gRPC 和 HTTP/2 协议，支持多路复用和流式传输
+- **🆕 数据转换引擎**：实时数据转换、类型转换、数据验证和清洗 (v2.2.0+)
+- **🆕 灵活表名控制**：直接使用配置的目标表名，无需自动后缀 (v2.2.0+)
 - **策略驱动**：通过配置文件定义数据同步任务，支持灵活的同步策略
 - **流量控制**：支持全局和任务级别的速率限制，防止对源系统造成压力
 - **并发控制**：支持多工作单元并发同步，提高同步效率
@@ -21,6 +23,7 @@
 - **监控告警**：内置 Prometheus 指标和健康检查接口
 - **数据处理管道**：支持数据过滤、转换和验证
 - **压缩传输**：支持多种压缩算法 (LZ4、ZSTD、GZIP) 降低网络带宽占用
+- **灵活日志控制**：命令行选项控制日志格式，支持生产环境优化
 
 ## 🏗️ 系统架构
 
@@ -136,12 +139,36 @@ sync_tasks:
     name: "用户数据同步"
     enabled: true
     source_table: "users"
-    target_table: "users_sync"
+    target_table: "users_sync"    # v2.2.0+: 直接使用此表名，不再自动添加后缀
 
     # 数据范围
     data_range:
       time_column: "created_at"
       where: "status = 'active'"
+
+    # 🆕 数据转换配置 (v2.2.0+)
+    data_transform:
+      enabled: true
+      field_transforms:
+        - column: "username"
+          type_conversion:
+            source_type: "string"
+            target_type: "varchar"
+            expression: "trim"      # 去除首尾空格
+          validation:
+            pattern: "^[a-zA-Z0-9_]+$"
+          required: true
+        - column: "age"
+          type_conversion:
+            source_type: "int64"
+            target_type: "int32"
+          validation:
+            min_value: 0
+            max_value: 150
+          default_value: 0
+      global_rules:
+        - source_type: "float64"
+          target_type: "double"
 
     # 数据校验
     validate:
@@ -182,6 +209,11 @@ kubectl apply -f configs/k8s-deployment.yaml
 ```
 
 ## 📖 详细文档
+
+### 🆕 v2.2.0 新功能文档
+- [数据转换功能完整指南](docs/data-transformation.md) - 字段级转换、验证、表达式处理
+- [更新日志](docs/CHANGELOG.md) - 详细的版本更新记录
+- [配置文件示例](configs/config.yaml) - 包含数据转换功能的完整配置示例
 
 ### 配置说明
 
@@ -363,6 +395,45 @@ sync_tasks:
 ### 数据处理管道
 
 ck2sr 支持可扩展的数据处理管道，内置以下处理器：
+
+#### 🆕 数据转换处理器 (Data Transform) - v2.2.0+
+
+```yaml
+data_transform:
+  enabled: true
+  field_transforms:
+    - column: "username"
+      type_conversion:
+        source_type: "string"
+        target_type: "varchar"
+        expression: "trim"        # 去除首尾空格
+      validation:
+        pattern: "^[a-zA-Z0-9_]+$"  # 正则验证
+        allow_null: false
+      required: true
+    - column: "price"
+      type_conversion:
+        source_type: "float64"
+        target_type: "decimal(15,2)"
+      validation:
+        min_value: 0.01
+        max_value: 999999.99
+      default_value: 0.00
+  global_rules:
+    - source_type: "string"
+      target_type: "varchar"
+    - source_type: "int64"
+      target_type: "bigint"
+```
+
+**支持的转换**:
+- **类型转换**: int64→int32, string→varchar, float64→decimal 等
+- **表达式转换**: upper, lower, trim, sprintf格式化
+- **数据验证**: 正则表达式、数值范围、空值检查
+- **默认值**: 处理缺失或无效数据
+- **必需字段**: 确保关键数据完整性
+
+详细配置请参考: [数据转换功能文档](docs/data-transformation.md)
 
 #### 列映射处理器 (Column Mapping)
 

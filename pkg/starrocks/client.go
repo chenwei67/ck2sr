@@ -902,15 +902,6 @@ func (c *Client) createTableFromSchema(tableName string, sourceSchema *arrow.Sch
 	return nil
 }
 
-// generateTableName 生成目标表名，添加_ck2sr后缀
-func (c *Client) generateTableName(sourceTableName string) string {
-	// 如果已经有_ck2sr后缀，就不再添加
-	if strings.HasSuffix(sourceTableName, "_ck2sr") {
-		return sourceTableName
-	}
-	return sourceTableName + "_ck2sr"
-}
-
 // buildCreateTableSQL 构建CREATE TABLE SQL语句
 func (c *Client) buildCreateTableSQL(tableName string, schema *arrow.Schema) (string, error) {
 	if schema.NumFields() == 0 {

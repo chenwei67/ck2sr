@@ -17,6 +17,7 @@ import (
 	"github.com/ck2sr/ck2sr/internal/storage"
 	"github.com/ck2sr/ck2sr/pkg/clickhouse"
 	"github.com/ck2sr/ck2sr/pkg/starrocks"
+	"github.com/ck2sr/ck2sr/pkg/transformer"
 	"github.com/ck2sr/ck2sr/pkg/utils"
 )
 
@@ -32,6 +33,7 @@ type SyncWorker struct {
 	logger      *logrus.Logger
 	rateLimiter *utils.RateLimiter
 	metrics     *utils.MetricsCollector
+	transformer *transformer.DataTransformer
 
 	// 状态管理
 	status      WorkerStatus
@@ -80,6 +82,9 @@ func NewSyncWorker(
 		taskConfig.RateLimit.BurstSize,
 	)
 
+	// 创建数据转换器
+	dataTransformer := transformer.NewDataTransformer(taskConfig.DataTransform, logger)
+
 	worker := &SyncWorker{
 		id:          workerID,
 		taskID:      taskConfig.TaskID,
@@ -91,6 +96,7 @@ func NewSyncWorker(
 		logger:      logger,
 		rateLimiter: rateLimiter,
 		metrics:     utils.NewMetricsCollector(),
+		transformer: dataTransformer,
 		status:      WorkerStatusIdle,
 		pauseChan:   make(chan struct{}),
 		resumeChan:  make(chan struct{}),
@@ -527,11 +533,30 @@ func (w *SyncWorker) processBatch(offset, batchSize int64) (int64, error) {
 
 // writeArrowToTarget 直接写入Arrow数据到目标数据库
 func (w *SyncWorker) writeArrowToTarget(record arrow.Record) error {
-	// 生成目标表名（添加_ck2sr后缀）
-	targetTableName := w.generateTargetTableName(w.taskConfig.TargetTable)
+	// 直接使用配置中的目标表名，不再自动添加后缀
+	targetTableName := w.taskConfig.TargetTable
+
+	// 应用数据转换（如果启用）
+	var transformedRecord arrow.Record
+	var err error
+
+	if w.transformer != nil && w.taskConfig.DataTransform.Enabled {
+		w.logger.Debugf("Applying data transformation to record with %d rows", record.NumRows())
+		transformedRecord, err = w.transformer.TransformRecord(record)
+		if err != nil {
+			return fmt.Errorf("failed to transform record: %w", err)
+		}
+		defer transformedRecord.Release() // 确保释放转换后的记录
+		w.logger.Debugf("Data transformation completed: %d rows processed", transformedRecord.NumRows())
+	} else {
+		// 如果没有启用转换，直接使用原记录
+		transformedRecord = record
+		transformedRecord.Retain() // 增加引用计数，确保与上面的释放逻辑一致
+		defer transformedRecord.Release()
+	}
 
 	// 使用StarRocks的Arrow Flight SQL写入器，支持自动建表
-	writer, err := w.srClient.NewArrowDataWriterWithAutoCreate(targetTableName, w.taskConfig.Concurrency.BatchSize, record.Schema())
+	writer, err := w.srClient.NewArrowDataWriterWithAutoCreate(targetTableName, w.taskConfig.Concurrency.BatchSize, transformedRecord.Schema())
 	if err != nil {
 		return fmt.Errorf("failed to create Arrow data writer: %w", err)
 	}
@@ -542,28 +567,12 @@ func (w *SyncWorker) writeArrowToTarget(record arrow.Record) error {
 	}
 
 	// 写入Arrow Record
-	if err := writer.WriteRecord(record); err != nil {
+	if err := writer.WriteRecord(transformedRecord); err != nil {
 		return fmt.Errorf("Arrow Flight SQL write failed: %w", err)
 	}
 
-	w.logger.Debugf("Arrow Flight SQL write completed: %d rows to table %s", record.NumRows(), targetTableName)
+	w.logger.Debugf("Arrow Flight SQL write completed: %d rows to table %s", transformedRecord.NumRows(), targetTableName)
 	return nil
-}
-
-// generateTargetTableName 生成目标表名，如果配置中的目标表名没有_ck2sr后缀则添加
-func (w *SyncWorker) generateTargetTableName(configuredTableName string) string {
-	// 如果配置中已经指定了完整的目标表名（包含_ck2sr后缀），则直接使用
-	if strings.HasSuffix(configuredTableName, "_ck2sr") {
-		return configuredTableName
-	}
-
-	// 如果配置中指定的是源表名，则根据源表名生成目标表名
-	if configuredTableName == w.taskConfig.SourceTable {
-		return w.taskConfig.SourceTable + "_ck2sr"
-	}
-
-	// 如果配置中指定了自定义目标表名，但没有_ck2sr后缀，则添加后缀
-	return configuredTableName + "_ck2sr"
 }
 
 // writeToTarget 写入目标数据库（保留向后兼容）
@@ -618,11 +627,7 @@ func (w *SyncWorker) buildWhereClause() string {
 		return ""
 	}
 
-	if len(conditions) == 1 {
-		return conditions[0]
-	}
-
-	return fmt.Sprintf("(%s)", fmt.Sprintf("%s", conditions[0]))
+	return strings.Join(conditions, " AND ")
 }
 
 // shouldRetry 判断是否应该重试

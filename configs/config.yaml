@@ -124,6 +124,54 @@ sync_tasks:
       email_address: "email"
       create_time: "created_at"
 
+    # 数据转换配置 (NEW v2.2.0+)
+    data_transform:
+      enabled: true
+      # 字段级转换配置
+      field_transforms:
+        - column: "username"
+          type_conversion:
+            source_type: "string"
+            target_type: "varchar"
+            expression: "trim"        # 去除首尾空格
+          required: true
+          validation:
+            pattern: "^[a-zA-Z0-9_]+$"  # 只允许字母数字下划线
+            allow_null: false
+        - column: "age"
+          type_conversion:
+            source_type: "int64"
+            target_type: "int32"
+          validation:
+            min_value: 0
+            max_value: 150
+          default_value: 0
+        - column: "email"
+          type_conversion:
+            source_type: "string"
+            target_type: "varchar"
+            expression: "lower"       # 转为小写
+          validation:
+            pattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
+            allow_null: false
+          required: true
+        - column: "status"
+          type_conversion:
+            source_type: "string"
+            target_type: "varchar"
+            expression: "upper"       # 转为大写
+          default_value: "ACTIVE"
+          validation:
+            pattern: "^(ACTIVE|INACTIVE|PENDING)$"
+      # 全局类型转换规则
+      global_rules:
+        - source_type: "float64"
+          target_type: "double"
+        - source_type: "int64"
+          target_type: "bigint"
+        - source_type: "timestamp"
+          target_type: "datetime"
+
     # 任务优先级
     priority: 1
 
@@ -135,7 +183,7 @@ sync_tasks:
     description: "同步订单表数据"
     enabled: true
     source_table: "orders"
-    target_table: "orders_sync"
+    target_table: "orders_sync"       # 直接使用此表名，不再自动添加_ck2sr后缀
 
     data_range:
       time_column: "order_date"
@@ -145,6 +193,30 @@ sync_tasks:
     time_window:
       start_time: "02:00"
       end_time: "06:00"
+
+    # 数据转换配置 - 订单数据专用转换
+    data_transform:
+      enabled: true
+      field_transforms:
+        - column: "order_amount"
+          type_conversion:
+            source_type: "float64"
+            target_type: "decimal(15,2)"
+          validation:
+            min_value: 0.01
+            max_value: 999999.99
+          default_value: 0.00
+        - column: "order_status"
+          type_conversion:
+            source_type: "string"
+            target_type: "varchar"
+            expression: "upper"
+          validation:
+            pattern: "^(COMPLETED|PAID|SHIPPED|CANCELLED)$"
+          default_value: "PENDING"
+      global_rules:
+        - source_type: "datetime"
+          target_type: "timestamp"
 
     validate:
       enabled: true

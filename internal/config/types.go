@@ -131,23 +131,55 @@ type ValidateConfig struct {
 	TolerancePercent float64  `yaml:"tolerance_percent" mapstructure:"tolerance_percent"` // 容错百分比
 }
 
+// 类型转换规则配置
+type TypeConversionRule struct {
+	SourceType string `yaml:"source_type" mapstructure:"source_type"` // 源数据类型
+	TargetType string `yaml:"target_type" mapstructure:"target_type"` // 目标数据类型
+	Expression string `yaml:"expression" mapstructure:"expression"`   // 转换表达式（可选）
+}
+
+// 字段转换配置
+type FieldTransformConfig struct {
+	Column           string               `yaml:"column" mapstructure:"column"`                       // 列名
+	TypeConversion   *TypeConversionRule  `yaml:"type_conversion" mapstructure:"type_conversion"`     // 类型转换
+	DefaultValue     interface{}          `yaml:"default_value" mapstructure:"default_value"`         // 默认值
+	Required         bool                 `yaml:"required" mapstructure:"required"`                   // 是否必需
+	Validation       *ValidationRule      `yaml:"validation" mapstructure:"validation"`               // 验证规则
+}
+
+// 验证规则配置
+type ValidationRule struct {
+	MinValue   interface{} `yaml:"min_value" mapstructure:"min_value"`     // 最小值
+	MaxValue   interface{} `yaml:"max_value" mapstructure:"max_value"`     // 最大值
+	Pattern    string      `yaml:"pattern" mapstructure:"pattern"`         // 正则表达式模式
+	AllowNull  bool        `yaml:"allow_null" mapstructure:"allow_null"`   // 是否允许空值
+}
+
+// 数据转换配置
+type DataTransformConfig struct {
+	Enabled         bool                   `yaml:"enabled" mapstructure:"enabled"`                   // 是否启用数据转换
+	FieldTransforms []FieldTransformConfig `yaml:"field_transforms" mapstructure:"field_transforms"` // 字段转换配置
+	GlobalRules     []TypeConversionRule   `yaml:"global_rules" mapstructure:"global_rules"`         // 全局类型转换规则
+}
+
 // 同步任务配置
 type SyncTaskConfig struct {
-	TaskID           string            `yaml:"task_id" mapstructure:"task_id"`                       // 任务唯一标识
-	Name             string            `yaml:"name" mapstructure:"name"`                             // 任务名称
-	Description      string            `yaml:"description" mapstructure:"description"`               // 任务描述
-	Enabled          bool              `yaml:"enabled" mapstructure:"enabled"`                       // 是否启用
-	SourceTable      string            `yaml:"source_table" mapstructure:"source_table"`             // 源表名
-	TargetTable      string            `yaml:"target_table" mapstructure:"target_table"`             // 目标表名
-	DataRange        DataRange         `yaml:"data_range" mapstructure:"data_range"`                 // 数据范围
-	TimeWindow       *TimeWindow       `yaml:"time_window" mapstructure:"time_window"`               // 时间窗口
-	RateLimit        RateLimitConfig   `yaml:"rate_limit" mapstructure:"rate_limit"`                 // 流量控制
-	Concurrency      ConcurrencyConfig `yaml:"concurrency" mapstructure:"concurrency"`               // 并发控制
-	Retry            RetryConfig       `yaml:"retry" mapstructure:"retry"`                           // 重试配置
-	Validate         ValidateConfig    `yaml:"validate" mapstructure:"validate"`                     // 数据校验
-	ColumnMapping    map[string]string `yaml:"column_mapping" mapstructure:"column_mapping"`         // 列映射
-	Priority         int               `yaml:"priority" mapstructure:"priority"`                     // 任务优先级
-	CronExpression   string            `yaml:"cron_expression" mapstructure:"cron_expression"`       // Cron 表达式
+	TaskID           string              `yaml:"task_id" mapstructure:"task_id"`                       // 任务唯一标识
+	Name             string              `yaml:"name" mapstructure:"name"`                             // 任务名称
+	Description      string              `yaml:"description" mapstructure:"description"`               // 任务描述
+	Enabled          bool                `yaml:"enabled" mapstructure:"enabled"`                       // 是否启用
+	SourceTable      string              `yaml:"source_table" mapstructure:"source_table"`             // 源表名
+	TargetTable      string              `yaml:"target_table" mapstructure:"target_table"`             // 目标表名
+	DataRange        DataRange           `yaml:"data_range" mapstructure:"data_range"`                 // 数据范围
+	TimeWindow       *TimeWindow         `yaml:"time_window" mapstructure:"time_window"`               // 时间窗口
+	RateLimit        RateLimitConfig     `yaml:"rate_limit" mapstructure:"rate_limit"`                 // 流量控制
+	Concurrency      ConcurrencyConfig   `yaml:"concurrency" mapstructure:"concurrency"`               // 并发控制
+	Retry            RetryConfig         `yaml:"retry" mapstructure:"retry"`                           // 重试配置
+	Validate         ValidateConfig      `yaml:"validate" mapstructure:"validate"`                     // 数据校验
+	ColumnMapping    map[string]string   `yaml:"column_mapping" mapstructure:"column_mapping"`         // 列映射
+	DataTransform    DataTransformConfig `yaml:"data_transform" mapstructure:"data_transform"`         // 数据转换配置
+	Priority         int                 `yaml:"priority" mapstructure:"priority"`                     // 任务优先级
+	CronExpression   string              `yaml:"cron_expression" mapstructure:"cron_expression"`       // Cron 表达式
 }
 
 // 监控配置
