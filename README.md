@@ -57,12 +57,15 @@
 ### 前置要求
 
 - Go 1.25.1+
-- ClickHouse 23.2.5.107+ (需支持 ArrowStream 格式输出)
+- ClickHouse 21.12+ (需支持 ArrowStream 格式输出)
 - StarRocks 4.0+ (需支持 Arrow Flight SQL)
 - Docker (可选)
 - Kubernetes (可选，用于分布式部署)
 
-**注意**: 确保 ClickHouse 支持 `FORMAT ArrowStream` 查询，StarRocks 实例已开启 Arrow Flight SQL 支持。
+**注意**:
+- 确保 ClickHouse 支持 `FORMAT ArrowStream` 查询语法（ClickHouse 21.12+ 版本支持）
+- StarRocks 实例已开启 Arrow Flight SQL 支持
+- 如遇到连接问题，请参考 [故障排除文档](docs/troubleshooting-clickhouse-connection.md)
 
 ### 安装
 

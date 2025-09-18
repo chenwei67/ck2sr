@@ -54,8 +54,10 @@ func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, er
 		dsn += fmt.Sprintf("&write_timeout=%s", cfg.WriteTimeout.String())
 	}
 
-	// 启用原生Arrow格式支持
-	dsn += "&native_protocol_version=54421&compression=lz4"
+	// 启用压缩和优化设置
+	if cfg.CompressionType != "none" && cfg.CompressionType != "" {
+		dsn += fmt.Sprintf("&compression=%s", cfg.CompressionType)
+	}
 
 	db, err := sql.Open("clickhouse", dsn)
 	if err != nil {
@@ -84,8 +86,13 @@ func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, er
 		return nil, fmt.Errorf("failed to ping ClickHouse: %w", err)
 	}
 
-	logger.Infof("Connected to ClickHouse at %s:%d via TCP, database: %s (ArrowStream enabled)",
-		cfg.Host, cfg.Port, cfg.Database)
+	logger.Infof("Connected to ClickHouse at %s:%d via TCP, database: %s (compression: %s)",
+		cfg.Host, cfg.Port, cfg.Database, func() string {
+			if cfg.CompressionType == "" {
+				return "none"
+			}
+			return cfg.CompressionType
+		}())
 
 	return &Client{
 		db:        db,
@@ -343,6 +350,11 @@ func (dr *ArrowStreamReader) ReadArrowStream(ctx context.Context, callback func(
 	// 执行查询获取ArrowStream数据
 	rows, err := dr.client.db.QueryContext(ctx, query)
 	if err != nil {
+		// 检查是否是ArrowStream格式不支持的错误
+		if strings.Contains(err.Error(), "Unknown format") ||
+		   strings.Contains(err.Error(), "ArrowStream") {
+			return fmt.Errorf("ClickHouse does not support ArrowStream format. Please ensure you are using ClickHouse 21.12+ or consider using CSV format as fallback: %w", err)
+		}
 		return fmt.Errorf("failed to execute ClickHouse query: %w", err)
 	}
 	defer rows.Close()
