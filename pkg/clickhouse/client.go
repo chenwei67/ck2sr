@@ -3,82 +3,25 @@ package clickhouse
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"database/sql"
-	"encoding/base64"
 	"fmt"
-	"io"
-	"io/ioutil"
 	"strings"
 	"time"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/apache/arrow/go/v14/arrow"
-	"github.com/apache/arrow/go/v14/arrow/flight"
-	"github.com/apache/arrow/go/v14/arrow/flight/flightsql"
 	"github.com/apache/arrow/go/v14/arrow/ipc"
 	"github.com/apache/arrow/go/v14/arrow/memory"
 	"github.com/ck2sr/ck2sr/internal/config"
 	"github.com/sirupsen/logrus"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/keepalive"
-	"google.golang.org/grpc/metadata"
 )
 
 // Client ClickHouse 客户端
 type Client struct {
-	db           *sql.DB
-	flightClient flight.Client
-	sqlClient    *flightsql.Client
-	config       *config.ClickHouseConfig
-	logger       *logrus.Logger
-	allocator    memory.Allocator
-}
-
-// authInterceptor 认证拦截器
-type authInterceptor struct {
-	username string
-	password string
-}
-
-// newAuthInterceptor 创建认证拦截器
-func newAuthInterceptor(username, password string) *authInterceptor {
-	return &authInterceptor{
-		username: username,
-		password: password,
-	}
-}
-
-// UnaryInterceptor 实现 gRPC 一元拦截器
-func (a *authInterceptor) UnaryInterceptor(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
-	// 添加认证信息到上下文
-	ctx = a.addAuthToContext(ctx)
-	return invoker(ctx, method, req, reply, cc, opts...)
-}
-
-// StreamInterceptor 实现 gRPC 流拦截器
-func (a *authInterceptor) StreamInterceptor(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn, method string, streamer grpc.Streamer, opts ...grpc.CallOption) (grpc.ClientStream, error) {
-	// 添加认证信息到上下文
-	ctx = a.addAuthToContext(ctx)
-	return streamer(ctx, desc, cc, method, opts...)
-}
-
-// addAuthToContext 添加认证信息到上下文
-func (a *authInterceptor) addAuthToContext(ctx context.Context) context.Context {
-	if a.username != "" || a.password != "" {
-		// 使用标准的 Basic Authentication 格式
-		auth := fmt.Sprintf("%s:%s", a.username, a.password)
-		encoded := base64.StdEncoding.EncodeToString([]byte(auth))
-
-		md := metadata.New(map[string]string{
-			"authorization": fmt.Sprintf("Basic %s", encoded),
-		})
-		ctx = metadata.NewOutgoingContext(ctx, md)
-	}
-	return ctx
+	db        *sql.DB
+	config    *config.ClickHouseConfig
+	logger    *logrus.Logger
+	allocator memory.Allocator
 }
 
 // NewClient 创建新的 ClickHouse 客户端
@@ -90,7 +33,7 @@ func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, er
 	// 创建内存分配器
 	allocator := memory.NewGoAllocator()
 
-	// 建立SQL连接用于元数据查询
+	// 构建ClickHouse TCP连接字符串，支持ArrowStream格式
 	dsn := fmt.Sprintf("tcp://%s:%d?database=%s", cfg.Host, cfg.Port, cfg.Database)
 	if cfg.Username != "" {
 		dsn += fmt.Sprintf("&username=%s", cfg.Username)
@@ -98,6 +41,21 @@ func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, er
 	if cfg.Password != "" {
 		dsn += fmt.Sprintf("&password=%s", cfg.Password)
 	}
+
+	// 添加ClickHouse特定配置
+	if cfg.MaxBlockSize > 0 {
+		dsn += fmt.Sprintf("&max_block_size=%d", cfg.MaxBlockSize)
+	}
+	if cfg.ReadTimeout > 0 {
+		dsn += fmt.Sprintf("&read_timeout=%s", cfg.ReadTimeout.String())
+	}
+	if cfg.WriteTimeout > 0 {
+		dsn += fmt.Sprintf("&write_timeout=%s", cfg.WriteTimeout.String())
+	}
+
+	// 启用原生Arrow格式支持
+	dsn += "&native_protocol_version=54421&compression=lz4"
+
 	db, err := sql.Open("clickhouse", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open ClickHouse database connection: %w", err)
@@ -108,14 +66,14 @@ func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, er
 	db.SetMaxIdleConns(cfg.MaxIdleConns)
 	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
 
-	// 测试SQL连接
+	// 测试连接
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	logger.Infof("Attempting to connect to ClickHouse - Host: %s, Port: %d, Database: %s, User: %s",
 		cfg.Host, cfg.Port, cfg.Database, func() string {
 			if cfg.Username == "" {
-				return "<empty>"
+				return "default"
 			}
 			return cfg.Username
 		}())
@@ -125,153 +83,23 @@ func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, er
 		return nil, fmt.Errorf("failed to ping ClickHouse: %w", err)
 	}
 
-	// 建立Flight SQL连接
-	flightEndpoint := fmt.Sprintf("%s:%d", cfg.FlightSQLEndpoint, cfg.FlightSQLPort)
-
-	var dialOpts []grpc.DialOption
-
-	// 设置 gRPC 消息大小限制，防止 "frame too large" 错误
-	maxMsgSize := cfg.MaxMessageSize * 1024 * 1024 // 配置值单位为MB，转换为字节
-	if maxMsgSize <= 0 {
-		maxMsgSize = 100 * 1024 * 1024 // 默认 100MB
-	}
-
-	// HTTP/2 协议安全的窗口大小配置
-	// 避免 "frame too large" 错误的关键配置
-	const maxSafeWindowSize = 16 * 1024 * 1024 // 16MB - HTTP/2 安全限制
-	const maxSafeBufferSize = 4 * 1024 * 1024  // 4MB - 缓冲区安全限制
-
-	initialWindowSize := int32(maxSafeWindowSize)
-	if maxMsgSize < maxSafeWindowSize {
-		initialWindowSize = int32(maxMsgSize)
-	}
-	if initialWindowSize < 65536 {
-		initialWindowSize = 65536 // 最小 64KB
-	}
-
-	// 计算安全的缓冲区大小
-	bufferSize := maxSafeBufferSize
-	if maxMsgSize/8 < maxSafeBufferSize { // 使用消息大小的1/8作为缓冲区
-		bufferSize = maxMsgSize / 8
-	}
-	if bufferSize < 32768 {
-		bufferSize = 32768 // 最小 32KB
-	}
-
-	dialOpts = append(dialOpts,
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(maxMsgSize),
-			grpc.MaxCallSendMsgSize(maxMsgSize),
-		),
-		grpc.WithInitialWindowSize(initialWindowSize),
-		grpc.WithInitialConnWindowSize(initialWindowSize),
-		grpc.WithWriteBufferSize(bufferSize),
-		grpc.WithReadBufferSize(bufferSize),
-		// 添加 HTTP/2 相关的安全选项
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                10 * time.Second, // 发送 keepalive ping 的间隔
-			Timeout:             3 * time.Second,  // 等待 keepalive ping 响应的超时时间
-			PermitWithoutStream: true,             // 允许在没有活动流时发送 keepalive ping
-		}),
-	)
-
-	logger.Infof("ClickHouse Flight SQL client configured - max message: %d MB, window size: %d KB, buffer size: %d KB",
-		maxMsgSize/(1024*1024), initialWindowSize/1024, bufferSize/1024)
-
-	if cfg.UseTLS {
-		tlsConfig := &tls.Config{
-			ServerName: cfg.FlightSQLEndpoint,
-		}
-
-		// 加载客户端证书
-		if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
-			cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
-			if err != nil {
-				db.Close()
-				return nil, fmt.Errorf("failed to load client certificate: %w", err)
-			}
-			tlsConfig.Certificates = []tls.Certificate{cert}
-		}
-
-		// 加载 CA 证书
-		if cfg.TLSCAFile != "" {
-			caCert, err := ioutil.ReadFile(cfg.TLSCAFile)
-			if err != nil {
-				db.Close()
-				return nil, fmt.Errorf("failed to read CA certificate: %w", err)
-			}
-			caCertPool := x509.NewCertPool()
-			if !caCertPool.AppendCertsFromPEM(caCert) {
-				db.Close()
-				return nil, fmt.Errorf("failed to parse CA certificate")
-			}
-			tlsConfig.RootCAs = caCertPool
-		}
-
-		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
-	} else {
-		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	}
-
-	// 添加认证拦截器
-	if cfg.FlightSQLAuth.Username != "" || cfg.FlightSQLAuth.Password != "" {
-		auth := newAuthInterceptor(cfg.FlightSQLAuth.Username, cfg.FlightSQLAuth.Password)
-		dialOpts = append(dialOpts,
-			grpc.WithUnaryInterceptor(auth.UnaryInterceptor),
-			grpc.WithStreamInterceptor(auth.StreamInterceptor),
-		)
-		logger.Infof("ClickHouse Flight SQL authentication enabled for user: %s", func() string {
-			if cfg.FlightSQLAuth.Username == "" {
-				return "<empty>"
-			}
-			return cfg.FlightSQLAuth.Username
-		}())
-	} else {
-		logger.Info("ClickHouse Flight SQL authentication disabled (no flight_sql_auth username/password provided)")
-	}
-
-	// 创建 Flight 客户端
-	flightClient, err := flight.NewClientWithMiddleware(flightEndpoint, nil, nil, dialOpts...)
-	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to create ClickHouse Flight client: %w", err)
-	}
-
-	// 创建 Flight SQL 客户端
-	sqlClient, err := flightsql.NewClient(flightEndpoint, nil, nil, dialOpts...)
-	if err != nil {
-		flightClient.Close()
-		db.Close()
-		return nil, fmt.Errorf("failed to create ClickHouse Flight SQL client: %w", err)
-	}
-
-	logger.Infof("Connected to ClickHouse at %s:%d (SQL) and %s (Flight SQL), database: %s",
-		cfg.Host, cfg.Port, flightEndpoint, cfg.Database)
+	logger.Infof("Connected to ClickHouse at %s:%d via TCP, database: %s (ArrowStream enabled)",
+		cfg.Host, cfg.Port, cfg.Database)
 
 	return &Client{
-		db:           db,
-		flightClient: flightClient,
-		sqlClient:    sqlClient,
-		config:       cfg,
-		logger:       logger,
-		allocator:    allocator,
+		db:        db,
+		config:    cfg,
+		logger:    logger,
+		allocator: allocator,
 	}, nil
 }
 
 // Close 关闭连接
 func (c *Client) Close() error {
-	var err error
-	if c.flightClient != nil {
-		if closeErr := c.flightClient.Close(); closeErr != nil {
-			err = closeErr
-		}
-	}
 	if c.db != nil {
-		if closeErr := c.db.Close(); closeErr != nil {
-			err = closeErr
-		}
+		return c.db.Close()
 	}
-	return err
+	return nil
 }
 
 // TableInfo 表信息
@@ -419,8 +247,8 @@ func (c *Client) GetMinMaxValues(ctx context.Context, tableName, columnName stri
 	return minVal, maxVal, nil
 }
 
-// ArrowDataReader Arrow数据读取器
-type ArrowDataReader struct {
+// ArrowStreamReader Arrow流式数据读取器
+type ArrowStreamReader struct {
 	client        *Client
 	tableName     string
 	columns       []string
@@ -432,9 +260,9 @@ type ArrowDataReader struct {
 	columnMapping map[string]string
 }
 
-// NewArrowDataReader 创建Arrow数据读取器
-func (c *Client) NewArrowDataReader(tableName string) *ArrowDataReader {
-	return &ArrowDataReader{
+// NewArrowStreamReader 创建Arrow流式数据读取器
+func (c *Client) NewArrowStreamReader(tableName string) *ArrowStreamReader {
+	return &ArrowStreamReader{
 		client:    c,
 		tableName: tableName,
 		batchSize: c.config.BatchSize,
@@ -442,44 +270,44 @@ func (c *Client) NewArrowDataReader(tableName string) *ArrowDataReader {
 }
 
 // WithColumns 设置要读取的列
-func (dr *ArrowDataReader) WithColumns(columns []string) *ArrowDataReader {
+func (dr *ArrowStreamReader) WithColumns(columns []string) *ArrowStreamReader {
 	dr.columns = columns
 	return dr
 }
 
 // WithWhere 设置 WHERE 条件
-func (dr *ArrowDataReader) WithWhere(whereClause string) *ArrowDataReader {
+func (dr *ArrowStreamReader) WithWhere(whereClause string) *ArrowStreamReader {
 	dr.whereClause = whereClause
 	return dr
 }
 
 // WithOrderBy 设置排序
-func (dr *ArrowDataReader) WithOrderBy(orderBy string) *ArrowDataReader {
+func (dr *ArrowStreamReader) WithOrderBy(orderBy string) *ArrowStreamReader {
 	dr.orderBy = orderBy
 	return dr
 }
 
 // WithLimit 设置限制和偏移
-func (dr *ArrowDataReader) WithLimit(limit, offset int64) *ArrowDataReader {
+func (dr *ArrowStreamReader) WithLimit(limit, offset int64) *ArrowStreamReader {
 	dr.limit = limit
 	dr.offset = offset
 	return dr
 }
 
 // WithBatchSize 设置批次大小
-func (dr *ArrowDataReader) WithBatchSize(batchSize int) *ArrowDataReader {
+func (dr *ArrowStreamReader) WithBatchSize(batchSize int) *ArrowStreamReader {
 	dr.batchSize = batchSize
 	return dr
 }
 
 // WithColumnMapping 设置列映射
-func (dr *ArrowDataReader) WithColumnMapping(mapping map[string]string) *ArrowDataReader {
+func (dr *ArrowStreamReader) WithColumnMapping(mapping map[string]string) *ArrowStreamReader {
 	dr.columnMapping = mapping
 	return dr
 }
 
-// ReadArrowBatch 使用Flight SQL读取Arrow格式数据
-func (dr *ArrowDataReader) ReadArrowBatch(ctx context.Context, callback func(record arrow.Record) error) error {
+// ReadArrowStream 使用TCP连接读取Arrow格式数据流
+func (dr *ArrowStreamReader) ReadArrowStream(ctx context.Context, callback func(record arrow.Record) error) error {
 	// 构建查询语句
 	var columns string
 	if len(dr.columns) > 0 {
@@ -488,6 +316,7 @@ func (dr *ArrowDataReader) ReadArrowBatch(ctx context.Context, callback func(rec
 		columns = "*"
 	}
 
+	// 构建查询，使用FORMAT ArrowStream
 	query := fmt.Sprintf("SELECT %s FROM %s", columns, dr.tableName)
 
 	if dr.whereClause != "" {
@@ -505,66 +334,65 @@ func (dr *ArrowDataReader) ReadArrowBatch(ctx context.Context, callback func(rec
 		}
 	}
 
-	dr.client.logger.Infof("Executing Flight SQL query: %s", query)
+	// 关键：使用ArrowStream格式输出
+	query += " FORMAT ArrowStream"
 
-	// 使用Flight SQL执行查询
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, dr.client.config.FlightTimeout)
-	defer cancel()
+	dr.client.logger.Infof("Executing ClickHouse ArrowStream query: %s", query)
 
-	dr.client.logger.Debugf("Flight SQL timeout: %v, batch size: %d", dr.client.config.FlightTimeout, dr.batchSize)
-
-	info, err := dr.client.sqlClient.Execute(ctxWithTimeout, query)
+	// 执行查询获取ArrowStream数据
+	rows, err := dr.client.db.QueryContext(ctx, query)
 	if err != nil {
-		// 检查是否是 "frame too large" 错误
-		if strings.Contains(err.Error(), "frame too large") {
-			dr.client.logger.Errorf("Frame too large error detected. Consider reducing batch_size (current: %d) or increasing max_message_size (current: %d MB)",
-				dr.batchSize, dr.client.config.MaxMessageSize)
+		return fmt.Errorf("failed to execute ClickHouse query: %w", err)
+	}
+	defer rows.Close()
+
+	// 读取ArrowStream数据
+	for rows.Next() {
+		var arrowData []byte
+		if err := rows.Scan(&arrowData); err != nil {
+			return fmt.Errorf("failed to scan arrow data: %w", err)
 		}
-		return fmt.Errorf("failed to execute Flight SQL query: %w", err)
+
+		// 解析ArrowStream数据
+		if err := dr.processArrowStreamData(arrowData, callback); err != nil {
+			return fmt.Errorf("failed to process arrow stream data: %w", err)
+		}
 	}
 
-	// 读取数据流
-	reader, err := dr.client.flightClient.DoGet(ctxWithTimeout, info.Endpoint[0].Ticket)
-	if err != nil {
-		if strings.Contains(err.Error(), "frame too large") {
-			dr.client.logger.Errorf("Frame too large error in data stream. Try reducing batch_size or increasing max_message_size")
-		}
-		return fmt.Errorf("failed to get Flight SQL data stream: %w", err)
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rows iteration error: %w", err)
 	}
-	// 从 Flight stream 读取数据
-	for {
-		msg, err := reader.Recv()
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			if strings.Contains(err.Error(), "frame too large") {
-				dr.client.logger.Errorf("Frame too large error while receiving data. Message size may exceed limits")
-			}
-			return fmt.Errorf("flight stream error: %w", err)
-		}
 
-		// 解析 Arrow 数据
-		buf := bytes.NewReader(msg.DataBody)
-		ipcReader, err := ipc.NewReader(buf)
-		if err != nil {
-			return fmt.Errorf("failed to create IPC reader: %w", err)
-		}
-		defer ipcReader.Release()
+	return nil
+}
 
-		for ipcReader.Next() {
-			record := ipcReader.Record()
-			defer record.Release()
+// processArrowStreamData 处理ArrowStream数据
+func (dr *ArrowStreamReader) processArrowStreamData(data []byte, callback func(record arrow.Record) error) error {
+	if len(data) == 0 {
+		return nil
+	}
 
-			// 调用回调函数处理记录
-			if err := callback(record); err != nil {
-				return fmt.Errorf("callback error: %w", err)
-			}
-		}
+	// 创建内存读取器
+	buf := bytes.NewReader(data)
+	reader, err := ipc.NewReader(buf)
+	if err != nil {
+		return fmt.Errorf("failed to create arrow IPC reader: %w", err)
+	}
+	defer reader.Release()
 
-		if err := ipcReader.Err(); err != nil {
-			return fmt.Errorf("IPC reader error: %w", err)
+	// 读取所有记录
+	for reader.Next() {
+		record := reader.Record()
+		defer record.Release()
+
+		// 调用回调函数处理记录
+		if err := callback(record); err != nil {
+			return fmt.Errorf("callback error: %w", err)
 		}
+	}
+
+	if err := reader.Err(); err != nil {
+		return fmt.Errorf("arrow reader error: %w", err)
 	}
 
 	return nil

@@ -24,27 +24,16 @@ type FlightSQLAuthConfig struct {
 type ClickHouseConfig struct {
 	DatabaseConfig `yaml:",inline" mapstructure:",squash"`
 
-	// Flight SQL 配置
-	FlightSQLEndpoint string              `yaml:"flight_sql_endpoint" mapstructure:"flight_sql_endpoint"` // Flight SQL 服务端点
-	FlightSQLPort     int                 `yaml:"flight_sql_port" mapstructure:"flight_sql_port"`         // Flight SQL 端口 (默认 9090)
-	FlightSQLAuth     FlightSQLAuthConfig `yaml:"flight_sql_auth" mapstructure:"flight_sql_auth"`         // Flight SQL 认证配置
-	UseTLS           bool                 `yaml:"use_tls" mapstructure:"use_tls"`                         // 是否使用 TLS
-	TLSCertFile      string               `yaml:"tls_cert_file" mapstructure:"tls_cert_file"`             // TLS 证书文件
-	TLSKeyFile       string               `yaml:"tls_key_file" mapstructure:"tls_key_file"`               // TLS 密钥文件
-	TLSCAFile        string               `yaml:"tls_ca_file" mapstructure:"tls_ca_file"`                 // TLS CA 文件
-
-	// Arrow Flight 配置
-	FlightTimeout    time.Duration `yaml:"flight_timeout" mapstructure:"flight_timeout"`       // Flight 超时时间
+	// ArrowStream 配置
 	BatchSize        int           `yaml:"batch_size" mapstructure:"batch_size"`               // Arrow 批次大小
-	CompressionType  string        `yaml:"compression_type" mapstructure:"compression_type"`   // 压缩类型 (none, gzip, lz4, zstd)
-	MaxMessageSize   int           `yaml:"max_message_size" mapstructure:"max_message_size"`   // gRPC 最大消息大小 (MB)
+	CompressionType  string        `yaml:"compression_type" mapstructure:"compression_type"`   // 压缩类型 (lz4, gzip, none)
 
-	// ClickHouse 特定参数（用于元数据查询）
-	MaxBlockSize   int           `yaml:"max_block_size" mapstructure:"max_block_size"`
-	ReadTimeout    time.Duration `yaml:"read_timeout" mapstructure:"read_timeout"`
-	WriteTimeout   time.Duration `yaml:"write_timeout" mapstructure:"write_timeout"`
-	MaxIdleConns   int           `yaml:"max_idle_conns" mapstructure:"max_idle_conns"`
-	MaxOpenConns   int           `yaml:"max_open_conns" mapstructure:"max_open_conns"`
+	// ClickHouse 特定参数（用于TCP连接和元数据查询）
+	MaxBlockSize    int           `yaml:"max_block_size" mapstructure:"max_block_size"`
+	ReadTimeout     time.Duration `yaml:"read_timeout" mapstructure:"read_timeout"`
+	WriteTimeout    time.Duration `yaml:"write_timeout" mapstructure:"write_timeout"`
+	MaxIdleConns    int           `yaml:"max_idle_conns" mapstructure:"max_idle_conns"`
+	MaxOpenConns    int           `yaml:"max_open_conns" mapstructure:"max_open_conns"`
 	ConnMaxLifetime time.Duration `yaml:"conn_max_lifetime" mapstructure:"conn_max_lifetime"`
 }
 
@@ -223,19 +212,14 @@ func DefaultConfig() *Config {
 			DatabaseConfig: DatabaseConfig{
 				Port: 9000,
 			},
-			FlightSQLEndpoint: "localhost",
-			FlightSQLPort:     9090,
-			UseTLS:           false,
-			FlightTimeout:    30 * time.Second,
 			BatchSize:        10000,
 			CompressionType:  "lz4",
-			MaxMessageSize:   100, // 100MB
-			MaxBlockSize:    100000,
-			ReadTimeout:     30 * time.Second,
-			WriteTimeout:    30 * time.Second,
-			MaxIdleConns:    10,
-			MaxOpenConns:    100,
-			ConnMaxLifetime: time.Hour,
+			MaxBlockSize:     100000,
+			ReadTimeout:      30 * time.Second,
+			WriteTimeout:     30 * time.Second,
+			MaxIdleConns:     10,
+			MaxOpenConns:     100,
+			ConnMaxLifetime:  time.Hour,
 		},
 		StarRocks: StarRocksConfig{
 			DatabaseConfig: DatabaseConfig{

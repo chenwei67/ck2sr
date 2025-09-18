@@ -4,16 +4,9 @@
 clickhouse:
   host: "clickhouse"
   port: 9000
-  username: "default"           # SQL 连接用户名
-  password: ""                  # SQL 连接密码
+  username: "default"           # TCP 连接用户名
+  password: ""                  # TCP 连接密码
   database: "default"
-  flight_sql_endpoint: "clickhouse"
-  flight_sql_port: 9090
-  flight_sql_auth:              # Flight SQL 独立认证配置
-    username: "default"         # Flight SQL 用户名
-    password: ""                # Flight SQL 密码
-  use_tls: false
-  flight_timeout: "30s"
   batch_size: 5000
   compression_type: "lz4"
 

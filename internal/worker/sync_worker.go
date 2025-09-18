@@ -467,8 +467,8 @@ func (w *SyncWorker) performSync() error {
 
 // processBatch 处理一个批次
 func (w *SyncWorker) processBatch(offset, batchSize int64) (int64, error) {
-	// 使用Arrow Flight SQL读取数据
-	reader := w.chClient.NewArrowDataReader(w.taskConfig.SourceTable)
+	// 使用ClickHouse ArrowStream读取数据
+	reader := w.chClient.NewArrowStreamReader(w.taskConfig.SourceTable)
 
 	// 设置查询参数
 	if len(w.taskConfig.ColumnMapping) > 0 {
@@ -499,15 +499,16 @@ func (w *SyncWorker) processBatch(offset, batchSize int64) (int64, error) {
 		reader.WithColumnMapping(w.taskConfig.ColumnMapping)
 	}
 
-	// 执行Arrow Flight SQL查询并处理每个Record
+	// 执行ClickHouse ArrowStream查询并零拷贝传输到StarRocks
 	var totalRowCount int64
-	err := reader.ReadArrowBatch(w.ctx, func(record arrow.Record) error {
+	// 执行零拷贝ArrowStream读取
+	err := reader.ReadArrowStream(w.ctx, func(record arrow.Record) error {
 		rowCount := record.NumRows()
 		totalRowCount += rowCount
 
-		w.logger.Infof("Processing Arrow record with %d rows", rowCount)
+		w.logger.Infof("Processing Arrow record with %d rows (zero-copy from ClickHouse ArrowStream)", rowCount)
 
-		// 直接使用Arrow Flight SQL写入StarRocks
+		// 零拷贝直接传输Arrow Record到StarRocks
 		if err := w.writeArrowToTarget(record); err != nil {
 			return fmt.Errorf("failed to write Arrow record to target: %w", err)
 		}

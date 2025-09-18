@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// TestClickHouseFlightSQLClient 测试ClickHouse Flight SQL客户端
-func TestClickHouseFlightSQLClient(t *testing.T) {
+// TestClickHouseArrowStreamClient 测试ClickHouse ArrowStream客户端
+func TestClickHouseArrowStreamClient(t *testing.T) {
 	// 跳过需要真实ClickHouse服务器的集成测试
 	if testing.Short() {
 		t.Skip("Skipping integration test in short mode")
@@ -26,16 +26,14 @@ func TestClickHouseFlightSQLClient(t *testing.T) {
 			Password: "",
 			Database: "default",
 		},
-		FlightSQLEndpoint: "localhost",
-		FlightSQLPort:     9090,
-		FlightSQLAuth: config.FlightSQLAuthConfig{
-			Username: "flight_test",
-			Password: "flight_pass",
-		},
-		UseTLS:           false,
-		FlightTimeout:    30 * time.Second,
 		BatchSize:        1000,
 		CompressionType:  "lz4",
+		MaxBlockSize:     100000,
+		ReadTimeout:      30 * time.Second,
+		WriteTimeout:     30 * time.Second,
+		MaxIdleConns:     10,
+		MaxOpenConns:     100,
+		ConnMaxLifetime:  time.Hour,
 	}
 
 	logger := logrus.New()
@@ -88,7 +86,7 @@ func TestClickHouseFlightSQLClient(t *testing.T) {
 		}
 		defer client.Close()
 
-		reader := client.NewArrowDataReader("system.numbers")
+		reader := client.NewArrowStreamReader("system.numbers")
 		assert.NotNil(t, reader)
 
 		// 配置读取器
@@ -98,15 +96,15 @@ func TestClickHouseFlightSQLClient(t *testing.T) {
 		defer cancel()
 
 		recordCount := 0
-		err = reader.ReadArrowBatch(ctx, func(record arrow.Record) error {
+		err = reader.ReadArrowStream(ctx, func(record arrow.Record) error {
 			recordCount++
-			t.Logf("Received record %d", recordCount)
+			t.Logf("Received ArrowStream record %d with %d rows", recordCount, record.NumRows())
 			return nil
 		})
 
 		// 如果连接失败，跳过测试
 		if err != nil {
-			t.Skipf("Could not read from ClickHouse: %v", err)
+			t.Logf("ArrowStream read failed (expected without real ClickHouse): %v", err)
 		}
 
 		assert.True(t, recordCount > 0, "Should have received at least one record")
@@ -124,12 +122,14 @@ func TestClickHouseClientConfiguration(t *testing.T) {
 				Password: "",
 				Database: "default",
 			},
-			FlightSQLEndpoint: "localhost",
-			FlightSQLPort:     9090,
-			UseTLS:           false,
-			FlightTimeout:    30 * time.Second,
 			BatchSize:        1000,
 			CompressionType:  "lz4",
+			MaxBlockSize:     100000,
+			ReadTimeout:      30 * time.Second,
+			WriteTimeout:     30 * time.Second,
+			MaxIdleConns:     10,
+			MaxOpenConns:     100,
+			ConnMaxLifetime:  time.Hour,
 		}
 
 		logger := logrus.New()
@@ -158,8 +158,6 @@ func TestClickHouseClientConfiguration(t *testing.T) {
 				Password: "",
 				Database: "",
 			},
-			FlightSQLEndpoint: "",
-			FlightSQLPort:     0,
 		}
 
 		logger := logrus.New()
@@ -185,16 +183,14 @@ func BenchmarkClickHouseClient(b *testing.B) {
 			Password: "",
 			Database: "default",
 		},
-		FlightSQLEndpoint: "localhost",
-		FlightSQLPort:     9090,
-		FlightSQLAuth: config.FlightSQLAuthConfig{
-			Username: "flight_test",
-			Password: "flight_pass",
-		},
-		UseTLS:           false,
-		FlightTimeout:    30 * time.Second,
 		BatchSize:        1000,
 		CompressionType:  "lz4",
+		MaxBlockSize:     100000,
+		ReadTimeout:      30 * time.Second,
+		WriteTimeout:     30 * time.Second,
+		MaxIdleConns:     10,
+		MaxOpenConns:     100,
+		ConnMaxLifetime:  time.Hour,
 	}
 
 	logger := logrus.New()
