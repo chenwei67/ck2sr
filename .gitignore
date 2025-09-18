@@ -123,6 +123,10 @@ test-results/
 ck2sr
 ck2sr_unix
 ck2sr.exe
+main
+*_test
+clickhouse_test
+starrocks_test
 
 # Docker
 .dockerignore
