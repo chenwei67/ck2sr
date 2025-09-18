@@ -1,0 +1,54 @@
+# 大批次数据传输配置示例
+# 适用于大数据量传输场景
+
+clickhouse:
+  host: "localhost"
+  port: 9000
+  username: "default"
+  password: ""
+  database: "default"
+
+  flight_sql_endpoint: "localhost"
+  flight_sql_port: 9090
+  flight_sql_auth:
+    username: "flight_user"
+    password: "flight_pass"
+
+  # 大批次配置
+  batch_size: 50000           # 增大批次大小
+  max_message_size: 500       # 增大消息大小到 500MB
+  flight_timeout: "120s"      # 增加超时时间
+  compression_type: "lz4"
+
+starrocks:
+  host: "localhost"
+  port: 9030
+  username: "root"
+  password: ""
+  database: "test"
+
+  flight_sql_endpoint: "localhost"
+  flight_sql_port: 9090
+  flight_sql_auth:
+    username: "root"
+    password: "secret"
+
+  # 大批次配置
+  batch_size: 50000           # 增大批次大小
+  max_message_size: 500       # 增大消息大小到 500MB
+  flight_timeout: "120s"      # 增加超时时间
+  compression_type: "lz4"
+
+# 全局并发配置
+global_concurrency:
+  max_workers: 5
+  max_concurrent_tasks: 3
+  batch_size: 50000           # 全局批次大小
+
+# 任务配置
+tasks:
+  - name: "large_table_sync"
+    source_table: "large_table"
+    target_table: "large_table"
+    concurrency:
+      batch_size: 100000      # 特定任务的超大批次

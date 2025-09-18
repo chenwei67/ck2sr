@@ -1,0 +1,54 @@
+# 小批次数据传输配置示例
+# 适用于避免 "frame too large" 错误的场景
+
+clickhouse:
+  host: "localhost"
+  port: 9000
+  username: "default"
+  password: ""
+  database: "default"
+
+  flight_sql_endpoint: "localhost"
+  flight_sql_port: 9090
+  flight_sql_auth:
+    username: "flight_user"
+    password: "flight_pass"
+
+  # 小批次配置，避免 frame too large 错误
+  batch_size: 1000            # 小批次大小
+  max_message_size: 50        # 较小的消息大小 50MB
+  flight_timeout: "60s"       # 适中的超时时间
+  compression_type: "lz4"     # 使用压缩减少传输大小
+
+starrocks:
+  host: "localhost"
+  port: 9030
+  username: "root"
+  password: ""
+  database: "test"
+
+  flight_sql_endpoint: "localhost"
+  flight_sql_port: 9090
+  flight_sql_auth:
+    username: "root"
+    password: "secret"
+
+  # 小批次配置，避免 frame too large 错误
+  batch_size: 1000            # 小批次大小
+  max_message_size: 50        # 较小的消息大小 50MB
+  flight_timeout: "60s"       # 适中的超时时间
+  compression_type: "lz4"     # 使用压缩减少传输大小
+
+# 全局并发配置
+global_concurrency:
+  max_workers: 10             # 增加工作线程补偿小批次
+  max_concurrent_tasks: 5
+  batch_size: 1000            # 全局小批次大小
+
+# 任务配置
+tasks:
+  - name: "safe_sync"
+    source_table: "test_table"
+    target_table: "test_table"
+    concurrency:
+      batch_size: 500         # 更小的批次确保安全传输
