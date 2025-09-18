@@ -67,6 +67,7 @@ func NewSyncWorker(
 ) *SyncWorker {
 	if logger == nil {
 		logger = logrus.New()
+		logger.SetReportCaller(true)
 	}
 
 	workerID := fmt.Sprintf("worker-%s-%s", taskConfig.TaskID, uuid.New().String()[:8])

@@ -24,6 +24,7 @@ type FileStorage struct {
 func NewFileStorage(basePath string, logger *logrus.Logger) (*FileStorage, error) {
 	if logger == nil {
 		logger = logrus.New()
+		logger.SetReportCaller(true)
 	}
 
 	// 确保存储目录存在

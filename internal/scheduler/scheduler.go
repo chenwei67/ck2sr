@@ -53,6 +53,7 @@ func NewScheduler(
 ) *SchedulerImpl {
 	if logger == nil {
 		logger = logrus.New()
+		logger.SetReportCaller(true)
 	}
 
 	if config == nil {

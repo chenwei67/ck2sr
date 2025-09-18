@@ -28,6 +28,7 @@ type Client struct {
 func NewClient(cfg *config.ClickHouseConfig, logger *logrus.Logger) (*Client, error) {
 	if logger == nil {
 		logger = logrus.New()
+		logger.SetReportCaller(true)
 	}
 
 	// 创建内存分配器

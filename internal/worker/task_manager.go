@@ -45,6 +45,7 @@ func NewTaskManager(
 ) *TaskManagerImpl {
 	if logger == nil {
 		logger = logrus.New()
+		logger.SetReportCaller(true)
 	}
 
 	tm := &TaskManagerImpl{

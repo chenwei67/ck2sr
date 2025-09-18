@@ -351,6 +351,9 @@ func (app *Application) shutdown(ctx context.Context) error {
 func setupLogger(logConfig config.LogConfig) *logrus.Logger {
 	logger := logrus.New()
 
+	// 启用调用者信息报告（包含文件名和行号）
+	logger.SetReportCaller(true)
+
 	// 设置日志级别
 	if *logLevel != "" {
 		logConfig.Level = *logLevel

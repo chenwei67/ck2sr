@@ -85,6 +85,7 @@ func (a *authInterceptor) addAuthToContext(ctx context.Context) context.Context 
 func NewClient(cfg *config.StarRocksConfig, logger *logrus.Logger) (*Client, error) {
 	if logger == nil {
 		logger = logrus.New()
+		logger.SetReportCaller(true)
 	}
 
 	// 创建内存分配器

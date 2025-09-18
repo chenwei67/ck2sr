@@ -22,6 +22,7 @@ type SimplePipeline struct {
 func NewSimplePipeline(logger *logrus.Logger) *SimplePipeline {
 	if logger == nil {
 		logger = logrus.New()
+		logger.SetReportCaller(true)
 	}
 
 	return &SimplePipeline{
@@ -278,6 +279,7 @@ type ProcessorFactory struct {
 func NewProcessorFactory(logger *logrus.Logger) *ProcessorFactory {
 	if logger == nil {
 		logger = logrus.New()
+		logger.SetReportCaller(true)
 	}
 
 	return &ProcessorFactory{
