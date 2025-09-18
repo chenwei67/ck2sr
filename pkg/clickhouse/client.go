@@ -1,7 +1,6 @@
 package clickhouse
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -10,7 +9,7 @@ import (
 
 	_ "github.com/ClickHouse/clickhouse-go/v2"
 	"github.com/apache/arrow/go/v14/arrow"
-	"github.com/apache/arrow/go/v14/arrow/ipc"
+	"github.com/apache/arrow/go/v14/arrow/array"
 	"github.com/apache/arrow/go/v14/arrow/memory"
 	"github.com/ck2sr/ck2sr/internal/config"
 	"github.com/sirupsen/logrus"
@@ -315,7 +314,7 @@ func (dr *ArrowStreamReader) WithColumnMapping(mapping map[string]string) *Arrow
 	return dr
 }
 
-// ReadArrowStream 使用TCP连接读取Arrow格式数据流
+// ReadArrowStream 使用TCP连接读取数据并转换为Arrow格式
 func (dr *ArrowStreamReader) ReadArrowStream(ctx context.Context, callback func(record arrow.Record) error) error {
 	// 构建查询语句
 	var columns string
@@ -325,7 +324,7 @@ func (dr *ArrowStreamReader) ReadArrowStream(ctx context.Context, callback func(
 		columns = "*"
 	}
 
-	// 构建查询，使用FORMAT ArrowStream
+	// 构建标准查询（不使用FORMAT ArrowStream）
 	query := fmt.Sprintf("SELECT %s FROM %s", columns, dr.tableName)
 
 	if dr.whereClause != "" {
@@ -343,33 +342,102 @@ func (dr *ArrowStreamReader) ReadArrowStream(ctx context.Context, callback func(
 		}
 	}
 
-	// 关键：使用ArrowStream格式输出
-	query += " FORMAT ArrowStream"
+	dr.client.logger.Infof("Executing ClickHouse query: %s", query)
 
-	dr.client.logger.Infof("Executing ClickHouse ArrowStream query: %s", query)
-
-	// 执行查询获取ArrowStream数据
+	// 执行标准查询
 	rows, err := dr.client.db.QueryContext(ctx, query)
 	if err != nil {
-		// 检查是否是ArrowStream格式不支持的错误
-		if strings.Contains(err.Error(), "Unknown format") ||
-		   strings.Contains(err.Error(), "ArrowStream") {
-			return fmt.Errorf("ClickHouse does not support ArrowStream format. Please ensure you are using ClickHouse 21.12+ or consider using CSV format as fallback: %w", err)
-		}
 		return fmt.Errorf("failed to execute ClickHouse query: %w", err)
 	}
 	defer rows.Close()
 
-	// 读取ArrowStream数据
+	// 获取列信息
+	columnNames, err := dr.getColumnInfo(rows)
+	if err != nil {
+		return fmt.Errorf("failed to get column info: %w", err)
+	}
+
+	// 处理数据行并转换为Arrow格式
+	return dr.processRowsToArrow(rows, columnNames, callback)
+}
+
+// getColumnInfo 获取查询结果的列信息
+func (dr *ArrowStreamReader) getColumnInfo(rows *sql.Rows) ([]string, error) {
+	columnTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get column types: %w", err)
+	}
+
+	columns := make([]string, len(columnTypes))
+	for i, ct := range columnTypes {
+		columns[i] = ct.Name()
+	}
+
+	return columns, nil
+}
+
+// processRowsToArrow 处理SQL行并转换为Arrow格式
+func (dr *ArrowStreamReader) processRowsToArrow(rows *sql.Rows, columnNames []string, callback func(record arrow.Record) error) error {
+	// 获取列类型信息
+	columnTypes, err := rows.ColumnTypes()
+	if err != nil {
+		return fmt.Errorf("failed to get column types: %w", err)
+	}
+
+	// 创建Arrow schema
+	fields := make([]arrow.Field, len(columnTypes))
+	for i, ct := range columnTypes {
+		arrowType, err := dr.mapClickHouseTypeToArrow(ct)
+		if err != nil {
+			dr.client.logger.Warnf("Failed to map column %s type %s to Arrow, using string: %v", ct.Name(), ct.DatabaseTypeName(), err)
+			arrowType = arrow.BinaryTypes.String
+		}
+		fields[i] = arrow.Field{
+			Name: ct.Name(),
+			Type: arrowType,
+		}
+	}
+
+	schema := arrow.NewSchema(fields, nil)
+
+	// 分批处理数据
+	batchSize := dr.batchSize
+	if batchSize <= 0 {
+		batchSize = 1000
+	}
+
+	var rowCount int
+	var batch [][]interface{}
+
 	for rows.Next() {
-		var arrowData []byte
-		if err := rows.Scan(&arrowData); err != nil {
-			return fmt.Errorf("failed to scan arrow data: %w", err)
+		// 创建扫描目标
+		values := make([]interface{}, len(columnTypes))
+		valuePtrs := make([]interface{}, len(columnTypes))
+		for i := range values {
+			valuePtrs[i] = &values[i]
 		}
 
-		// 解析ArrowStream数据
-		if err := dr.processArrowStreamData(arrowData, callback); err != nil {
-			return fmt.Errorf("failed to process arrow stream data: %w", err)
+		// 扫描行数据
+		if err := rows.Scan(valuePtrs...); err != nil {
+			return fmt.Errorf("failed to scan row: %w", err)
+		}
+
+		batch = append(batch, values)
+		rowCount++
+
+		// 达到批次大小时处理
+		if len(batch) >= batchSize {
+			if err := dr.processBatchToArrow(schema, batch, callback); err != nil {
+				return fmt.Errorf("failed to process batch: %w", err)
+			}
+			batch = batch[:0] // 重置批次
+		}
+	}
+
+	// 处理剩余数据
+	if len(batch) > 0 {
+		if err := dr.processBatchToArrow(schema, batch, callback); err != nil {
+			return fmt.Errorf("failed to process final batch: %w", err)
 		}
 	}
 
@@ -377,38 +445,7 @@ func (dr *ArrowStreamReader) ReadArrowStream(ctx context.Context, callback func(
 		return fmt.Errorf("rows iteration error: %w", err)
 	}
 
-	return nil
-}
-
-// processArrowStreamData 处理ArrowStream数据
-func (dr *ArrowStreamReader) processArrowStreamData(data []byte, callback func(record arrow.Record) error) error {
-	if len(data) == 0 {
-		return nil
-	}
-
-	// 创建内存读取器
-	buf := bytes.NewReader(data)
-	reader, err := ipc.NewReader(buf)
-	if err != nil {
-		return fmt.Errorf("failed to create arrow IPC reader: %w", err)
-	}
-	defer reader.Release()
-
-	// 读取所有记录
-	for reader.Next() {
-		record := reader.Record()
-		defer record.Release()
-
-		// 调用回调函数处理记录
-		if err := callback(record); err != nil {
-			return fmt.Errorf("callback error: %w", err)
-		}
-	}
-
-	if err := reader.Err(); err != nil {
-		return fmt.Errorf("arrow reader error: %w", err)
-	}
-
+	dr.client.logger.Infof("Processed %d rows from ClickHouse", rowCount)
 	return nil
 }
 
@@ -454,4 +491,216 @@ func (c *Client) GetServerVersion(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to get server version: %w", err)
 	}
 	return version, nil
+}
+
+// mapClickHouseTypeToArrow 将ClickHouse类型映射到Arrow类型
+func (dr *ArrowStreamReader) mapClickHouseTypeToArrow(ct *sql.ColumnType) (arrow.DataType, error) {
+	typeName := strings.ToLower(ct.DatabaseTypeName())
+
+	switch {
+	case strings.Contains(typeName, "int8"):
+		return arrow.PrimitiveTypes.Int8, nil
+	case strings.Contains(typeName, "int16"):
+		return arrow.PrimitiveTypes.Int16, nil
+	case strings.Contains(typeName, "int32"):
+		return arrow.PrimitiveTypes.Int32, nil
+	case strings.Contains(typeName, "int64"):
+		return arrow.PrimitiveTypes.Int64, nil
+	case strings.Contains(typeName, "uint8"):
+		return arrow.PrimitiveTypes.Uint8, nil
+	case strings.Contains(typeName, "uint16"):
+		return arrow.PrimitiveTypes.Uint16, nil
+	case strings.Contains(typeName, "uint32"):
+		return arrow.PrimitiveTypes.Uint32, nil
+	case strings.Contains(typeName, "uint64"):
+		return arrow.PrimitiveTypes.Uint64, nil
+	case strings.Contains(typeName, "float32"):
+		return arrow.PrimitiveTypes.Float32, nil
+	case strings.Contains(typeName, "float64"):
+		return arrow.PrimitiveTypes.Float64, nil
+	case strings.Contains(typeName, "string") || strings.Contains(typeName, "fixedstring"):
+		return arrow.BinaryTypes.String, nil
+	case strings.Contains(typeName, "date"):
+		return arrow.FixedWidthTypes.Date32, nil
+	case strings.Contains(typeName, "datetime"):
+		return arrow.FixedWidthTypes.Timestamp_s, nil
+	case strings.Contains(typeName, "bool"):
+		return arrow.FixedWidthTypes.Boolean, nil
+	default:
+		// 默认使用字符串类型
+		return arrow.BinaryTypes.String, nil
+	}
+}
+
+// processBatchToArrow 将批次数据转换为Arrow Record
+func (dr *ArrowStreamReader) processBatchToArrow(schema *arrow.Schema, batch [][]interface{}, callback func(record arrow.Record) error) error {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	mem := memory.NewGoAllocator()
+	builder := array.NewRecordBuilder(mem, schema)
+	defer builder.Release()
+
+	// 为每一列构建数据
+	for colIdx, field := range schema.Fields() {
+		colBuilder := builder.Field(colIdx)
+
+		for rowIdx := 0; rowIdx < len(batch); rowIdx++ {
+			value := batch[rowIdx][colIdx]
+
+			if err := dr.appendValueToBuilder(colBuilder, value, field.Type); err != nil {
+				dr.client.logger.Warnf("Failed to append value for column %s: %v, using null", field.Name, err)
+				colBuilder.AppendNull()
+			}
+		}
+	}
+
+	// 创建Arrow Record
+	record := builder.NewRecord()
+	defer record.Release()
+
+	// 调用回调函数处理记录
+	return callback(record)
+}
+
+// appendValueToBuilder 将值添加到Arrow builder中
+func (dr *ArrowStreamReader) appendValueToBuilder(builder array.Builder, value interface{}, dataType arrow.DataType) error {
+	if value == nil {
+		builder.AppendNull()
+		return nil
+	}
+
+	switch b := builder.(type) {
+	case *array.StringBuilder:
+		if v, ok := dr.convertToString(value); ok {
+			b.Append(v)
+		} else {
+			return fmt.Errorf("cannot convert %v to string", value)
+		}
+	case *array.Int64Builder:
+		if v, ok := dr.convertToInt64(value); ok {
+			b.Append(v)
+		} else {
+			return fmt.Errorf("cannot convert %v to int64", value)
+		}
+	case *array.Float64Builder:
+		if v, ok := dr.convertToFloat64(value); ok {
+			b.Append(v)
+		} else {
+			return fmt.Errorf("cannot convert %v to float64", value)
+		}
+	case *array.BooleanBuilder:
+		if v, ok := dr.convertToBool(value); ok {
+			b.Append(v)
+		} else {
+			return fmt.Errorf("cannot convert %v to bool", value)
+		}
+	case *array.TimestampBuilder:
+		if v, ok := dr.convertToTimestamp(value); ok {
+			b.Append(v)
+		} else {
+			return fmt.Errorf("cannot convert %v to timestamp", value)
+		}
+	default:
+		// 默认转换为字符串
+		if sb, ok := builder.(*array.StringBuilder); ok {
+			if v, ok := dr.convertToString(value); ok {
+				sb.Append(v)
+			} else {
+				return fmt.Errorf("cannot convert %v to string", value)
+			}
+		} else {
+			return fmt.Errorf("unsupported builder type: %T", builder)
+		}
+	}
+
+	return nil
+}
+
+// 类型转换辅助方法
+func (dr *ArrowStreamReader) convertToString(value interface{}) (string, bool) {
+	switch v := value.(type) {
+	case string:
+		return v, true
+	case []byte:
+		return string(v), true
+	case nil:
+		return "", true
+	default:
+		return fmt.Sprintf("%v", v), true
+	}
+}
+
+func (dr *ArrowStreamReader) convertToInt64(value interface{}) (int64, bool) {
+	switch v := value.(type) {
+	case int64:
+		return v, true
+	case int32:
+		return int64(v), true
+	case int16:
+		return int64(v), true
+	case int8:
+		return int64(v), true
+	case int:
+		return int64(v), true
+	case uint64:
+		return int64(v), true
+	case uint32:
+		return int64(v), true
+	case uint16:
+		return int64(v), true
+	case uint8:
+		return int64(v), true
+	case uint:
+		return int64(v), true
+	default:
+		return 0, false
+	}
+}
+
+func (dr *ArrowStreamReader) convertToFloat64(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	default:
+		return 0, false
+	}
+}
+
+func (dr *ArrowStreamReader) convertToBool(value interface{}) (bool, bool) {
+	switch v := value.(type) {
+	case bool:
+		return v, true
+	case int:
+		return v != 0, true
+	case int64:
+		return v != 0, true
+	case string:
+		return v == "true" || v == "1", true
+	default:
+		return false, false
+	}
+}
+
+func (dr *ArrowStreamReader) convertToTimestamp(value interface{}) (arrow.Timestamp, bool) {
+	switch v := value.(type) {
+	case time.Time:
+		return arrow.Timestamp(v.Unix()), true
+	case string:
+		if t, err := time.Parse("2006-01-02 15:04:05", v); err == nil {
+			return arrow.Timestamp(t.Unix()), true
+		}
+		return 0, false
+	default:
+		return 0, false
+	}
 }
