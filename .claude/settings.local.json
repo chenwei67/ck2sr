@@ -1,7 +1,16 @@
 {
   "permissions": {
     "allow": [
-      "Bash(go run:*)"
+      "Bash(go run:*)",
+      "Bash(go get:*)",
+      "Bash(go mod:*)",
+      "Bash(timeout 120 go build -o ck2sr main.go)",
+      "Bash(go build:*)",
+      "Bash(./ck2sr:*)",
+      "Bash(go test:*)",
+      "Bash(git add:*)",
+      "Bash(timeout 10 go run:*)",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []
