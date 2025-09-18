@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,6 +24,101 @@ import (
 	"github.com/ck2sr/ck2sr/pkg/starrocks"
 )
 
+// CustomJSONFormatter 自定义 JSON 格式化器，支持控制 file 和 func 字段
+type CustomJSONFormatter struct {
+	TimestampFormat string
+	IncludeFile     bool
+	IncludeFunc     bool
+}
+
+// Format 格式化日志条目
+func (f *CustomJSONFormatter) Format(entry *logrus.Entry) ([]byte, error) {
+	data := make(logrus.Fields, len(entry.Data)+4)
+
+	// 复制原有数据
+	for k, v := range entry.Data {
+		data[k] = v
+	}
+
+	// 添加基本字段
+	data["time"] = entry.Time.Format(f.TimestampFormat)
+	data["level"] = entry.Level.String()
+	data["msg"] = entry.Message
+
+	// 根据配置添加调用者信息
+	if entry.HasCaller() {
+		if f.IncludeFile {
+			data["file"] = fmt.Sprintf("%s:%d", entry.Caller.File, entry.Caller.Line)
+		}
+		if f.IncludeFunc {
+			data["func"] = entry.Caller.Function
+		}
+	}
+
+	serialized, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal fields to JSON: %w", err)
+	}
+
+	return append(serialized, '\n'), nil
+}
+
+// CustomTextFormatter 自定义文本格式化器，支持控制 file 和 func 字段
+type CustomTextFormatter struct {
+	FullTimestamp   bool
+	TimestampFormat string
+	IncludeFile     bool
+	IncludeFunc     bool
+}
+
+// Format 格式化日志条目
+func (f *CustomTextFormatter) Format(entry *logrus.Entry) ([]byte, error) {
+	var b strings.Builder
+
+	// 时间戳
+	if f.FullTimestamp {
+		b.WriteString(entry.Time.Format(f.TimestampFormat))
+		b.WriteByte(' ')
+	}
+
+	// 日志级别
+	b.WriteByte('[')
+	b.WriteString(strings.ToUpper(entry.Level.String()))
+	b.WriteByte(']')
+	b.WriteByte(' ')
+
+	// 调用者信息
+	if entry.HasCaller() {
+		var callerInfo []string
+		if f.IncludeFile {
+			callerInfo = append(callerInfo, fmt.Sprintf("%s:%d", entry.Caller.File, entry.Caller.Line))
+		}
+		if f.IncludeFunc {
+			callerInfo = append(callerInfo, entry.Caller.Function)
+		}
+		if len(callerInfo) > 0 {
+			b.WriteByte('(')
+			b.WriteString(strings.Join(callerInfo, " "))
+			b.WriteByte(')')
+			b.WriteByte(' ')
+		}
+	}
+
+	// 消息
+	b.WriteString(entry.Message)
+
+	// 额外字段
+	for key, value := range entry.Data {
+		b.WriteByte(' ')
+		b.WriteString(key)
+		b.WriteByte('=')
+		b.WriteString(fmt.Sprintf("%v", value))
+	}
+
+	b.WriteByte('\n')
+	return []byte(b.String()), nil
+}
+
 const (
 	// 应用信息
 	AppName    = "ck2sr"
@@ -32,11 +128,13 @@ const (
 
 // 命令行参数
 var (
-	configFile = flag.String("config", "./config.yaml", "配置文件路径")
-	logLevel   = flag.String("log-level", "", "日志级别 (debug, info, warn, error)")
-	version    = flag.Bool("version", false, "显示版本信息")
-	daemon     = flag.Bool("daemon", false, "以守护进程模式运行")
-	validate   = flag.Bool("validate", false, "验证配置文件")
+	configFile     = flag.String("config", "./config.yaml", "配置文件路径")
+	logLevel       = flag.String("log-level", "", "日志级别 (debug, info, warn, error)")
+	version        = flag.Bool("version", false, "显示版本信息")
+	daemon         = flag.Bool("daemon", false, "以守护进程模式运行")
+	validate       = flag.Bool("validate", false, "验证配置文件")
+	logWithFile    = flag.Bool("log-with-file", true, "日志中包含文件名和行号")
+	logWithFunc    = flag.Bool("log-with-func", true, "日志中包含函数名")
 )
 
 // Application 应用程序结构
@@ -351,8 +449,8 @@ func (app *Application) shutdown(ctx context.Context) error {
 func setupLogger(logConfig config.LogConfig) *logrus.Logger {
 	logger := logrus.New()
 
-	// 启用调用者信息报告（包含文件名和行号）
-	logger.SetReportCaller(true)
+	// 根据命令行参数决定是否启用调用者信息报告
+	logger.SetReportCaller(*logWithFile || *logWithFunc)
 
 	// 设置日志级别
 	if *logLevel != "" {
@@ -365,15 +463,19 @@ func setupLogger(logConfig config.LogConfig) *logrus.Logger {
 	}
 	logger.SetLevel(level)
 
-	// 设置日志格式
+	// 设置日志格式 - 使用自定义格式化器
 	if logConfig.Format == "json" {
-		logger.SetFormatter(&logrus.JSONFormatter{
+		logger.SetFormatter(&CustomJSONFormatter{
 			TimestampFormat: time.RFC3339,
+			IncludeFile:     *logWithFile,
+			IncludeFunc:     *logWithFunc,
 		})
 	} else {
-		logger.SetFormatter(&logrus.TextFormatter{
+		logger.SetFormatter(&CustomTextFormatter{
 			FullTimestamp:   true,
 			TimestampFormat: time.RFC3339,
+			IncludeFile:     *logWithFile,
+			IncludeFunc:     *logWithFunc,
 		})
 	}
 
