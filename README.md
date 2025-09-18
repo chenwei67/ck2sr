@@ -4,11 +4,11 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)]()
 
-**ck2sr** 是一个高效、可靠、完整的 ClickHouse 到 StarRocks 数据同步服务，采用 **Apache Arrow Flight SQL** 协议实现高性能数据传输，支持分布式部署，能够在生产环境中稳定运行。
+**ck2sr** 是一个高效、可靠、完整的 ClickHouse 到 StarRocks 数据同步服务，采用 **ClickHouse TCP + ArrowStream** 和 **StarRocks Arrow Flight SQL** 实现高性能零拷贝数据传输，支持分布式部署，能够在生产环境中稳定运行。
 
 ## 🌟 核心特性
 
-- **Apache Arrow Flight SQL**：统一采用 Apache Arrow Flight SQL 协议进行数据读取和写入，实现高性能列式数据传输
+- **混合高性能架构**：ClickHouse 使用 TCP 连接 + ArrowStream 格式查询，StarRocks 使用 Arrow Flight SQL 写入，实现高性能列式数据传输
 - **零拷贝数据传输**：基于 Arrow 列式内存格式，实现端到端的零拷贝数据传输
 - **高性能网络通信**：基于 gRPC 和 HTTP/2 协议，支持多路复用和流式传输
 - **策略驱动**：通过配置文件定义数据同步任务，支持灵活的同步策略
@@ -29,8 +29,8 @@
 │   ClickHouse    │    │      ck2sr      │    │    StarRocks    │
 │   (数据源)      │───▶│   (同步服务)    │───▶│   (目标库)      │
 │                 │    │                 │    │                 │
-│ Arrow Flight    │    │ Arrow Memory    │    │ Arrow Flight    │
-│ SQL Server      │    │ Allocation      │    │ SQL Endpoint    │
+│ TCP Connection  │    │ Arrow Memory    │    │ Arrow Flight    │
+│ ArrowStream     │    │ Zero-Copy       │    │ SQL Endpoint    │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
                                │
                                ▼
@@ -39,8 +39,8 @@
                     │ (File/K8s CRD)  │
                     └─────────────────┘
 
-数据流: Arrow Flight SQL → Arrow Record → Arrow Flight SQL
-协议: gRPC/HTTP2 + Arrow 列式格式 + 可选压缩传输
+数据流: TCP ArrowStream → Arrow Record → Arrow Flight SQL
+协议: ClickHouse TCP + StarRocks gRPC/HTTP2 + Arrow 列式格式 + 零拷贝传输
 ```
 
 ### 核心组件
@@ -57,12 +57,12 @@
 ### 前置要求
 
 - Go 1.25.1+
-- ClickHouse 23.2.5.107+ (需支持 Arrow Flight SQL)
+- ClickHouse 23.2.5.107+ (需支持 ArrowStream 格式输出)
 - StarRocks 4.0+ (需支持 Arrow Flight SQL)
 - Docker (可选)
 - Kubernetes (可选，用于分布式部署)
 
-**注意**: 确保 ClickHouse 和 StarRocks 实例已开启 Arrow Flight SQL 支持。
+**注意**: 确保 ClickHouse 支持 `FORMAT ArrowStream` 查询，StarRocks 实例已开启 Arrow Flight SQL 支持。
 
 ### 安装
 
@@ -100,13 +100,15 @@ clickhouse:
   password: ""
   database: "default"
 
-  # Arrow Flight SQL 配置
-  flight_sql_endpoint: "localhost"
-  flight_sql_port: 9090
-  use_tls: false
-  flight_timeout: "30s"
-  batch_size: 1000
-  compression_type: "lz4"  # 可选: lz4, zstd, gzip
+  # ArrowStream 配置
+  batch_size: 10000
+  compression_type: "lz4"  # lz4, gzip, none
+  max_block_size: 100000
+  read_timeout: "30s"
+  write_timeout: "30s"
+  max_idle_conns: 10
+  max_open_conns: 100
+  conn_max_lifetime: "1h"
 
 starrocks:
   host: "localhost"
@@ -118,10 +120,13 @@ starrocks:
   # Arrow Flight SQL 配置
   flight_sql_endpoint: "localhost"
   flight_sql_port: 9090
+  flight_sql_auth:
+    username: "flight_user"
+    password: "flight_pass"
   use_tls: false
   flight_timeout: "30s"
-  batch_size: 1000
-  compression_type: "lz4"  # 可选: lz4, zstd, gzip
+  batch_size: 10000
+  compression_type: "lz4"  # none, gzip, lz4, zstd
 
 sync_tasks:
   - task_id: "user_data_sync"
@@ -177,16 +182,17 @@ kubectl apply -f configs/k8s-deployment.yaml
 
 ### 配置说明
 
-#### Apache Arrow Flight SQL 配置
+#### 混合高性能数据传输架构
 
-ck2sr v2.0+ 采用统一的 Apache Arrow Flight SQL 协议进行数据传输，相比传统的 Stream Load 方式具有以下优势：
+ck2sr v2.1+ 采用混合架构进行高性能数据传输，相比传统的 Stream Load 方式具有以下优势：
 
-- **高性能**: 基于列式存储格式，零拷贝数据传输
-- **标准化**: 使用 Arrow Flight SQL 标准协议，兼容性更好
+- **零拷贝传输**: ClickHouse ArrowStream 直接传输到 StarRocks Arrow Flight SQL
+- **高性能**: 基于列式存储格式，端到端 Arrow 格式传输
+- **标准化**: ClickHouse 使用原生 TCP 协议，StarRocks 使用 Arrow Flight SQL 标准协议
 - **压缩传输**: 支持多种压缩算法降低网络开销
 - **流式处理**: 支持大数据集的流式传输
 
-##### ClickHouse Flight SQL 配置
+##### ClickHouse TCP + ArrowStream 配置
 
 ```yaml
 clickhouse:
@@ -197,20 +203,22 @@ clickhouse:
   password: ""
   database: "default"
 
-  # Arrow Flight SQL 配置
-  flight_sql_endpoint: "localhost"      # Flight SQL 服务地址
-  flight_sql_port: 9090                 # Flight SQL 服务端口
-  use_tls: false                        # 是否启用 TLS 加密
-  flight_timeout: "30s"                 # Flight SQL 查询超时时间
-  batch_size: 1000                      # Arrow 批次大小
-  compression_type: "lz4"               # 压缩算法: lz4, zstd, gzip, none
+  # ArrowStream 配置
+  batch_size: 10000                     # Arrow 批次大小
+  compression_type: "lz4"               # 压缩算法: lz4, gzip, none
+  max_block_size: 100000                # ClickHouse 块大小
+  read_timeout: "30s"                   # TCP 读取超时
+  write_timeout: "30s"                  # TCP 写入超时
+  max_idle_conns: 10                    # 最大空闲连接数
+  max_open_conns: 100                   # 最大连接数
+  conn_max_lifetime: "1h"               # 连接最大生命周期
 ```
 
-##### StarRocks Flight SQL 配置
+##### StarRocks Arrow Flight SQL 配置
 
 ```yaml
 starrocks:
-  # 基本数据库连接配置
+  # 基本数据库连接配置 (MySQL 协议用于元数据)
   host: "localhost"
   port: 9030
   username: "root"
@@ -220,38 +228,53 @@ starrocks:
   # Arrow Flight SQL 配置
   flight_sql_endpoint: "localhost"      # Flight SQL 服务地址
   flight_sql_port: 9090                 # Flight SQL 服务端口
+  flight_sql_auth:                      # Flight SQL 独立认证
+    username: "flight_user"             # Flight SQL 用户名
+    password: "flight_pass"             # Flight SQL 密码
   use_tls: false                        # 是否启用 TLS 加密
   flight_timeout: "30s"                 # Flight SQL 写入超时时间
-  batch_size: 1000                      # Arrow 批次大小
-  compression_type: "lz4"               # 压缩算法: lz4, zstd, gzip, none
+  batch_size: 10000                     # Arrow 批次大小
+  compression_type: "lz4"               # 压缩算法: none, gzip, lz4, zstd
+  max_message_size: 100                 # gRPC 最大消息大小 (MB)
 ```
 
-#### 从 Stream Load 迁移到 Arrow Flight SQL
+#### 从旧版本迁移到混合架构
 
 如果您正在从旧版本的 ck2sr 升级，需要进行以下配置更新：
 
-1. **移除旧的 StarRocks Stream Load 配置**:
+1. **更新 ClickHouse 配置 (从 Flight SQL 到 TCP + ArrowStream)**:
    ```yaml
    # 旧配置 (需要删除)
-   starrocks:
-     stream_load_url: "http://localhost:8030"
-   ```
-
-2. **添加 Arrow Flight SQL 配置**:
-   ```yaml
-   # 新配置
    clickhouse:
      flight_sql_endpoint: "localhost"
      flight_sql_port: 9090
-     # ... 其他 Flight SQL 配置
+     use_tls: false
 
+   # 新配置
+   clickhouse:
+     host: "localhost"
+     port: 9000  # TCP 端口
+     batch_size: 10000
+     compression_type: "lz4"
+     max_block_size: 100000
+     # ... 其他 TCP 配置
+   ```
+
+2. **保持 StarRocks Arrow Flight SQL 配置**:
+   ```yaml
+   # StarRocks 配置保持不变，继续使用 Arrow Flight SQL
    starrocks:
      flight_sql_endpoint: "localhost"
      flight_sql_port: 9090
+     flight_sql_auth:
+       username: "flight_user"
+       password: "flight_pass"
      # ... 其他 Flight SQL 配置
    ```
 
-3. **确保数据库支持**: 验证您的 ClickHouse 和 StarRocks 实例已启用 Arrow Flight SQL 支持。
+3. **确保数据库支持**:
+   - 验证 ClickHouse 支持 `FORMAT ArrowStream` 查询语法
+   - 验证 StarRocks 实例已启用 Arrow Flight SQL 支持
 
 #### 基本配置
 
@@ -428,29 +451,47 @@ log:
 
 ### 性能调优
 
-#### Arrow Flight SQL 性能优化
+#### 混合架构性能优化
 
 - **批次大小调优**: 调整 `batch_size` 平衡内存使用和传输效率
   ```yaml
-  # 推荐配置
-  batch_size: 1000    # 小数据集
-  batch_size: 5000    # 中等数据集
-  batch_size: 10000   # 大数据集
+  # ClickHouse ArrowStream 推荐配置
+  clickhouse:
+    batch_size: 5000     # 小数据集
+    batch_size: 10000    # 中等数据集
+    batch_size: 20000    # 大数据集
+
+  # StarRocks Flight SQL 推荐配置
+  starrocks:
+    batch_size: 5000     # 小数据集
+    batch_size: 10000    # 中等数据集
+    batch_size: 20000    # 大数据集
   ```
 
 - **压缩算法选择**: 根据网络和 CPU 资源选择合适的压缩算法
   ```yaml
   compression_type: "lz4"    # 高压缩速度，适合 CPU 密集场景
-  compression_type: "zstd"   # 高压缩比，适合网络带宽受限场景
   compression_type: "gzip"   # 通用压缩，兼容性好
   compression_type: "none"   # 无压缩，适合高速内网环境
   ```
 
-- **Flight SQL 超时配置**: 根据数据量调整合理的超时时间
+- **ClickHouse TCP 连接优化**: 调整连接池和超时配置
   ```yaml
-  flight_timeout: "30s"   # 小批次数据
-  flight_timeout: "60s"   # 中等批次数据
-  flight_timeout: "120s"  # 大批次数据
+  clickhouse:
+    max_open_conns: 100      # 最大连接数
+    max_idle_conns: 10       # 最大空闲连接数
+    conn_max_lifetime: "1h"  # 连接生命周期
+    read_timeout: "30s"      # 读取超时
+    write_timeout: "30s"     # 写入超时
+  ```
+
+- **StarRocks Flight SQL 超时配置**: 根据数据量调整合理的超时时间
+  ```yaml
+  starrocks:
+    flight_timeout: "30s"   # 小批次数据
+    flight_timeout: "60s"   # 中等批次数据
+    flight_timeout: "120s"  # 大批次数据
+    max_message_size: 100   # gRPC 最大消息大小 (MB)
   ```
 
 #### 内存优化
@@ -458,7 +499,8 @@ log:
 - 调整 `batch_size` 控制批处理大小
 - 设置合适的 `max_workers` 数量
 - 使用 `rate_limit` 控制内存使用
-- Arrow Flight SQL 自动管理内存分配和释放
+- Arrow 零拷贝传输减少内存分配和释放开销
+- ClickHouse TCP 连接池复用减少内存占用
 
 #### 网络优化
 
@@ -466,6 +508,8 @@ log:
 - 调整读写超时时间
 - 使用 `burst_size` 控制突发流量
 - 选择合适的压缩算法降低网络传输量
+- ClickHouse TCP 连接复用减少连接开销
+- StarRocks gRPC 连接池优化
 
 ## 🧪 测试
 
@@ -516,6 +560,16 @@ go test -bench=. -benchmem ./...
 3. 创建新的 Issue，详细描述问题
 
 ## 📋 版本历史
+
+- **v2.1.0** (2024-09-18)
+  - **架构重构**: 采用混合高性能传输架构
+  - ClickHouse: 从 Flight SQL 切换到 TCP 连接 + ArrowStream 格式查询
+  - StarRocks: 保持 Arrow Flight SQL 协议进行数据导入
+  - 实现零拷贝流式传输：ClickHouse ArrowStream → StarRocks Flight SQL
+  - 移除 ClickHouse Flight SQL 依赖，简化配置和代码结构
+  - 优化性能：原生 Arrow 格式端到端传输
+  - 启用 ClickHouse 原生协议版本和 LZ4 压缩
+  - 完整的单元测试覆盖和编译验证
 
 - **v2.0.0** (2024-09-17)
   - **重大更新**: 全面采用 Apache Arrow Flight SQL 协议
