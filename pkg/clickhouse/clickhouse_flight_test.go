@@ -28,6 +28,10 @@ func TestClickHouseFlightSQLClient(t *testing.T) {
 		},
 		FlightSQLEndpoint: "localhost",
 		FlightSQLPort:     9090,
+		FlightSQLAuth: config.FlightSQLAuthConfig{
+			Username: "flight_test",
+			Password: "flight_pass",
+		},
 		UseTLS:           false,
 		FlightTimeout:    30 * time.Second,
 		BatchSize:        1000,
@@ -183,6 +187,10 @@ func BenchmarkClickHouseClient(b *testing.B) {
 		},
 		FlightSQLEndpoint: "localhost",
 		FlightSQLPort:     9090,
+		FlightSQLAuth: config.FlightSQLAuthConfig{
+			Username: "flight_test",
+			Password: "flight_pass",
+		},
 		UseTLS:           false,
 		FlightTimeout:    30 * time.Second,
 		BatchSize:        1000,

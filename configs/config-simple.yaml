@@ -4,11 +4,14 @@
 clickhouse:
   host: "clickhouse"
   port: 9000
-  username: "default"
-  password: ""
+  username: "default"           # SQL 连接用户名
+  password: ""                  # SQL 连接密码
   database: "default"
   flight_sql_endpoint: "clickhouse"
   flight_sql_port: 9090
+  flight_sql_auth:              # Flight SQL 独立认证配置
+    username: "default"         # Flight SQL 用户名
+    password: ""                # Flight SQL 密码
   use_tls: false
   flight_timeout: "30s"
   batch_size: 5000
@@ -17,11 +20,14 @@ clickhouse:
 starrocks:
   host: "starrocks-fe"
   port: 9030
-  username: "root"
-  password: ""
+  username: "root"              # MySQL 连接用户名
+  password: ""                  # MySQL 连接密码
   database: "test"
   flight_sql_endpoint: "starrocks-fe"
   flight_sql_port: 9090
+  flight_sql_auth:              # Flight SQL 独立认证配置
+    username: "root"            # Flight SQL 用户名
+    password: ""                # Flight SQL 密码
   use_tls: false
   flight_timeout: "30s"
   batch_size: 5000

@@ -14,22 +14,30 @@ type DatabaseConfig struct {
 	Database string `yaml:"database" mapstructure:"database"`
 }
 
+// Flight SQL 认证配置
+type FlightSQLAuthConfig struct {
+	Username string `yaml:"username" mapstructure:"username"`
+	Password string `yaml:"password" mapstructure:"password"`
+}
+
 // ClickHouse 特定配置
 type ClickHouseConfig struct {
 	DatabaseConfig `yaml:",inline" mapstructure:",squash"`
 
 	// Flight SQL 配置
-	FlightSQLEndpoint string `yaml:"flight_sql_endpoint" mapstructure:"flight_sql_endpoint"` // Flight SQL 服务端点
-	FlightSQLPort     int    `yaml:"flight_sql_port" mapstructure:"flight_sql_port"`         // Flight SQL 端口 (默认 9090)
-	UseTLS           bool   `yaml:"use_tls" mapstructure:"use_tls"`                         // 是否使用 TLS
-	TLSCertFile      string `yaml:"tls_cert_file" mapstructure:"tls_cert_file"`             // TLS 证书文件
-	TLSKeyFile       string `yaml:"tls_key_file" mapstructure:"tls_key_file"`               // TLS 密钥文件
-	TLSCAFile        string `yaml:"tls_ca_file" mapstructure:"tls_ca_file"`                 // TLS CA 文件
+	FlightSQLEndpoint string              `yaml:"flight_sql_endpoint" mapstructure:"flight_sql_endpoint"` // Flight SQL 服务端点
+	FlightSQLPort     int                 `yaml:"flight_sql_port" mapstructure:"flight_sql_port"`         // Flight SQL 端口 (默认 9090)
+	FlightSQLAuth     FlightSQLAuthConfig `yaml:"flight_sql_auth" mapstructure:"flight_sql_auth"`         // Flight SQL 认证配置
+	UseTLS           bool                 `yaml:"use_tls" mapstructure:"use_tls"`                         // 是否使用 TLS
+	TLSCertFile      string               `yaml:"tls_cert_file" mapstructure:"tls_cert_file"`             // TLS 证书文件
+	TLSKeyFile       string               `yaml:"tls_key_file" mapstructure:"tls_key_file"`               // TLS 密钥文件
+	TLSCAFile        string               `yaml:"tls_ca_file" mapstructure:"tls_ca_file"`                 // TLS CA 文件
 
 	// Arrow Flight 配置
 	FlightTimeout    time.Duration `yaml:"flight_timeout" mapstructure:"flight_timeout"`       // Flight 超时时间
 	BatchSize        int           `yaml:"batch_size" mapstructure:"batch_size"`               // Arrow 批次大小
 	CompressionType  string        `yaml:"compression_type" mapstructure:"compression_type"`   // 压缩类型 (none, gzip, lz4, zstd)
+	MaxMessageSize   int           `yaml:"max_message_size" mapstructure:"max_message_size"`   // gRPC 最大消息大小 (MB)
 
 	// ClickHouse 特定参数（用于元数据查询）
 	MaxBlockSize   int           `yaml:"max_block_size" mapstructure:"max_block_size"`
@@ -45,17 +53,19 @@ type StarRocksConfig struct {
 	DatabaseConfig `yaml:",inline" mapstructure:",squash"`
 
 	// Flight SQL 配置
-	FlightSQLEndpoint string `yaml:"flight_sql_endpoint" mapstructure:"flight_sql_endpoint"` // Flight SQL 服务端点
-	FlightSQLPort     int    `yaml:"flight_sql_port" mapstructure:"flight_sql_port"`         // Flight SQL 端口 (默认 9090)
-	UseTLS           bool   `yaml:"use_tls" mapstructure:"use_tls"`                         // 是否使用 TLS
-	TLSCertFile      string `yaml:"tls_cert_file" mapstructure:"tls_cert_file"`             // TLS 证书文件
-	TLSKeyFile       string `yaml:"tls_key_file" mapstructure:"tls_key_file"`               // TLS 密钥文件
-	TLSCAFile        string `yaml:"tls_ca_file" mapstructure:"tls_ca_file"`                 // TLS CA 文件
+	FlightSQLEndpoint string              `yaml:"flight_sql_endpoint" mapstructure:"flight_sql_endpoint"` // Flight SQL 服务端点
+	FlightSQLPort     int                 `yaml:"flight_sql_port" mapstructure:"flight_sql_port"`         // Flight SQL 端口 (默认 9090)
+	FlightSQLAuth     FlightSQLAuthConfig `yaml:"flight_sql_auth" mapstructure:"flight_sql_auth"`         // Flight SQL 认证配置
+	UseTLS           bool                 `yaml:"use_tls" mapstructure:"use_tls"`                         // 是否使用 TLS
+	TLSCertFile      string               `yaml:"tls_cert_file" mapstructure:"tls_cert_file"`             // TLS 证书文件
+	TLSKeyFile       string               `yaml:"tls_key_file" mapstructure:"tls_key_file"`               // TLS 密钥文件
+	TLSCAFile        string               `yaml:"tls_ca_file" mapstructure:"tls_ca_file"`                 // TLS CA 文件
 
 	// Arrow Flight 配置
 	FlightTimeout    time.Duration `yaml:"flight_timeout" mapstructure:"flight_timeout"`       // Flight 超时时间
 	BatchSize        int           `yaml:"batch_size" mapstructure:"batch_size"`               // Arrow 批次大小
 	CompressionType  string        `yaml:"compression_type" mapstructure:"compression_type"`   // 压缩类型 (none, gzip, lz4, zstd)
+	MaxMessageSize   int           `yaml:"max_message_size" mapstructure:"max_message_size"`   // gRPC 最大消息大小 (MB)
 
 	// 连接池配置
 	MaxIdleConns    int           `yaml:"max_idle_conns" mapstructure:"max_idle_conns"`
@@ -213,6 +223,13 @@ func DefaultConfig() *Config {
 			DatabaseConfig: DatabaseConfig{
 				Port: 9000,
 			},
+			FlightSQLEndpoint: "localhost",
+			FlightSQLPort:     9090,
+			UseTLS:           false,
+			FlightTimeout:    30 * time.Second,
+			BatchSize:        10000,
+			CompressionType:  "lz4",
+			MaxMessageSize:   100, // 100MB
 			MaxBlockSize:    100000,
 			ReadTimeout:     30 * time.Second,
 			WriteTimeout:    30 * time.Second,
@@ -230,6 +247,7 @@ func DefaultConfig() *Config {
 			FlightTimeout:    30 * time.Second,
 			BatchSize:        10000,
 			CompressionType:  "lz4",
+			MaxMessageSize:   100, // 100MB
 			MaxIdleConns:     10,
 			MaxOpenConns:     100,
 			ConnMaxLifetime:  time.Hour,
@@ -283,17 +301,13 @@ func (c *Config) Validate() error {
 	if c.ClickHouse.Host == "" {
 		return fmt.Errorf("clickhouse.host is required")
 	}
-	if c.ClickHouse.Username == "" {
-		return fmt.Errorf("clickhouse.username is required")
-	}
+	// ClickHouse 的 username 可以为空，默认使用 "default"
 
 	// 验证 StarRocks 配置
 	if c.StarRocks.Host == "" {
 		return fmt.Errorf("starrocks.host is required")
 	}
-	if c.StarRocks.Username == "" {
-		return fmt.Errorf("starrocks.username is required")
-	}
+	// StarRocks 的 username 可以为空，某些环境可能不需要认证
 
 	// 验证同步任务配置
 	taskIDs := make(map[string]bool)

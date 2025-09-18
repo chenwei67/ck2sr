@@ -5,13 +5,16 @@
 clickhouse:
   host: "localhost"
   port: 9000
-  username: "default"
-  password: ""
+  username: "default"           # SQL 连接用户名
+  password: ""                  # SQL 连接密码
   database: "default"
 
   # Flight SQL 配置
   flight_sql_endpoint: "localhost"
   flight_sql_port: 9090
+  flight_sql_auth:              # Flight SQL 独立认证配置
+    username: "flight_user"     # Flight SQL 用户名（可与SQL连接不同）
+    password: "flight_pass"     # Flight SQL 密码（可与SQL连接不同）
   use_tls: false
   tls_cert_file: ""
   tls_key_file: ""
@@ -21,6 +24,7 @@ clickhouse:
   flight_timeout: "30s"
   batch_size: 10000
   compression_type: "lz4"  # none, gzip, lz4, zstd
+  max_message_size: 100    # gRPC 最大消息大小 (MB), 用于防止 "frame too large" 错误
 
   # 连接配置
   max_block_size: 100000
@@ -34,13 +38,16 @@ clickhouse:
 starrocks:
   host: "localhost"
   port: 9030
-  username: "root"
-  password: ""
+  username: "root"              # MySQL 连接用户名
+  password: ""                  # MySQL 连接密码
   database: "test"
 
   # Flight SQL 配置
   flight_sql_endpoint: "localhost"
   flight_sql_port: 9090
+  flight_sql_auth:              # Flight SQL 独立认证配置
+    username: "flight_admin"    # Flight SQL 用户名（可与MySQL连接不同）
+    password: "flight_secret"   # Flight SQL 密码（可与MySQL连接不同）
   use_tls: false
   tls_cert_file: ""
   tls_key_file: ""
@@ -50,6 +57,7 @@ starrocks:
   flight_timeout: "30s"
   batch_size: 10000
   compression_type: "lz4"  # none, gzip, lz4, zstd
+  max_message_size: 100    # gRPC 最大消息大小 (MB), 用于防止 "frame too large" 错误
 
   # 连接池配置
   max_idle_conns: 10
