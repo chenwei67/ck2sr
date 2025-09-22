@@ -266,8 +266,12 @@ func performSync(cfg *SyncConfig) {
 
 	logger.Info("StarRocks connections established successfully")
 
+	// 创建统一的上下文，使用较长的超时时间用于数据同步
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
 	// 执行同步
-	if err := performDataSync(srcClient, dstClient, cfg, logger); err != nil {
+	if err := performDataSync(ctx, srcClient, dstClient, cfg, logger); err != nil {
 		logger.Fatalf("Sync failed: %v", err)
 	}
 
@@ -370,14 +374,14 @@ func createMySQLOnlyConfig(endpoint string, port int, username, password, databa
 }
 
 // performDataSync 执行数据同步操作
-func performDataSync(srcClient, dstClient *starrocks.Client, cfg *SyncConfig, logger *logrus.Logger) error {
+func performDataSync(ctx context.Context, srcClient, dstClient *starrocks.Client, cfg *SyncConfig, logger *logrus.Logger) error {
 	startTime := time.Now()
 
 	logger.Infof("Starting sync from table '%s.%s' to table '%s.%s'", cfg.DB, cfg.Table, cfg.DstDB, cfg.DstTable)
 
 	// 获取源表信息
 	logger.Info("Getting source table info...")
-	srcTableInfo, err := srcClient.GetTableInfo(srcClient.AuthCtx, cfg.Table)
+	srcTableInfo, err := srcClient.GetTableInfo(ctx, cfg.Table)
 	if err != nil {
 		return fmt.Errorf("failed to get source table info: %w", err)
 	}
@@ -386,7 +390,7 @@ func performDataSync(srcClient, dstClient *starrocks.Client, cfg *SyncConfig, lo
 		srcTableInfo.Name, len(srcTableInfo.Columns), srcTableInfo.TotalRows)
 
 	// 统计源表行数
-	srcRowCount, err := srcClient.CountRows(srcClient.AuthCtx, cfg.Table, "")
+	srcRowCount, err := srcClient.CountRows(ctx, cfg.Table, "")
 	if err != nil {
 		return fmt.Errorf("failed to count source rows: %w", err)
 	}
@@ -421,7 +425,7 @@ func performDataSync(srcClient, dstClient *starrocks.Client, cfg *SyncConfig, lo
 	logger.Infof("Executing Flight SQL query: %s", query)
 
 	// 执行Flight SQL查询并获取Arrow流
-	flightInfo, err := srcClient.ExecuteQuery(srcClient.AuthCtx, query)
+	flightInfo, err := srcClient.ExecuteQuery(ctx, query)
 	if err != nil {
 		return fmt.Errorf("failed to execute Flight SQL query: %w", err)
 	}
@@ -433,8 +437,8 @@ func performDataSync(srcClient, dstClient *starrocks.Client, cfg *SyncConfig, lo
 	for i, endpoint := range flightInfo.Endpoint {
 		logger.Infof("Processing endpoint %d/%d...", i+1, len(flightInfo.Endpoint))
 
-		// 获取端点的数据流
-		stream, err := srcClient.DoGet(srcClient.AuthCtx, endpoint.Ticket)
+		// 获取端点的数据流 - 使用与查询相同的上下文
+		stream, err := srcClient.DoGet(ctx, endpoint.Ticket)
 		if err != nil {
 			logger.Warnf("Failed to get data from endpoint %d: %v", i, err)
 			continue
@@ -469,7 +473,7 @@ func performDataSync(srcClient, dstClient *starrocks.Client, cfg *SyncConfig, lo
 					record.Retain()
 
 					// 写入到目标表
-					if err := writer.WriteArrowRecord(dstClient.AuthCtx, record); err != nil {
+					if err := writer.WriteArrowRecord(ctx, record); err != nil {
 						record.Release()
 						ipcReader.Release()
 						return fmt.Errorf("failed to write Arrow record: %w", err)
@@ -489,13 +493,13 @@ func performDataSync(srcClient, dstClient *starrocks.Client, cfg *SyncConfig, lo
 	}
 
 	// 完成写入
-	result, err := writer.Finalize(dstClient.AuthCtx)
+	result, err := writer.Finalize(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to finalize write: %w", err)
 	}
 
 	// 验证同步结果
-	dstRowCount, err := dstClient.CountRows(dstClient.AuthCtx, cfg.DstTable, "")
+	dstRowCount, err := dstClient.CountRows(ctx, cfg.DstTable, "")
 	if err != nil {
 		logger.Warnf("Failed to count destination rows for verification: %v", err)
 	} else {

@@ -1504,9 +1504,19 @@ func (c *Client) ExecuteQuery(ctx context.Context, query string) (*flight.Flight
 
 	c.logger.Debugf("Executing Flight SQL query: %s", query)
 
+	// 确保使用认证上下文执行查询
+	execCtx := ctx
+	if c.AuthCtx != nil {
+		execCtx = c.AuthCtx
+		c.logger.Debugf("Using authenticated context for ExecuteQuery operation")
+	} else {
+		c.logger.Warnf("No authenticated context available, using provided context")
+	}
+
 	// 使用Flight SQL客户端执行查询
-	flightInfo, err := c.sqlClient.Execute(ctx, query)
+	flightInfo, err := c.sqlClient.Execute(execCtx, query)
 	if err != nil {
+		c.logger.Errorf("Failed to execute Flight SQL query: %v", err)
 		return nil, fmt.Errorf("failed to execute Flight SQL query: %w", err)
 	}
 
@@ -1522,11 +1532,22 @@ func (c *Client) DoGet(ctx context.Context, ticket *flight.Ticket) (flight.Fligh
 
 	c.logger.Debugf("Getting data from Flight ticket")
 
-	// 使用Flight客户端获取数据流
-	stream, err := c.flightClient.DoGet(ctx, ticket)
+	// 确保使用认证上下文获取数据流 - 关键修复
+	doGetCtx := ctx
+	if c.AuthCtx != nil {
+		doGetCtx = c.AuthCtx
+		c.logger.Debugf("Using authenticated context for DoGet operation")
+	} else {
+		c.logger.Warnf("No authenticated context available, using provided context")
+	}
+
+	// 使用Flight客户端获取数据流，必须使用相同的认证上下文
+	stream, err := c.flightClient.DoGet(doGetCtx, ticket)
 	if err != nil {
+		c.logger.Errorf("Failed to get data stream from ticket: %v", err)
 		return nil, fmt.Errorf("failed to get data from ticket: %w", err)
 	}
 
+	c.logger.Debugf("Successfully obtained Flight data stream")
 	return stream, nil
 }
