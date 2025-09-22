@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"flag"
 	"fmt"
@@ -10,10 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apache/arrow/go/v14/arrow"
-	"github.com/apache/arrow/go/v14/arrow/array"
-	"github.com/apache/arrow/go/v14/arrow/ipc"
-	"github.com/apache/arrow/go/v14/arrow/memory"
+	"github.com/apache/arrow/go/v18/arrow"
+	"github.com/apache/arrow/go/v18/arrow/array"
+	"github.com/apache/arrow/go/v18/arrow/memory"
 	"github.com/sirupsen/logrus"
 
 	"github.com/ck2sr/ck2sr/internal/config"
@@ -251,27 +249,23 @@ func performSync(cfg *SyncConfig) {
 	}
 	defer dstClient.Close()
 
-	// // 测试连接
-	// ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	// defer cancel()
+	// 创建统一的上下文，使用较长的超时时间用于数据同步
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	logger.Info("Testing StarRocks connections...")
-	if err := srcClient.TestConnection(srcClient.AuthCtx); err != nil {
+	if err := srcClient.TestConnection(ctx); err != nil {
 		logger.Fatalf("Source StarRocks connection failed: %v", err)
 	}
 
-	if err := dstClient.TestConnection(dstClient.AuthCtx); err != nil {
+	if err := dstClient.TestConnection(ctx); err != nil {
 		logger.Fatalf("Destination StarRocks connection failed: %v", err)
 	}
 
 	logger.Info("StarRocks connections established successfully")
 
-	// 创建统一的上下文，使用较长的超时时间用于数据同步
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
 	// 执行同步
-	if err := performDataSync(ctx, srcClient, dstClient, cfg, logger); err != nil {
+	if err := performDataSync(context.Background(), srcClient, dstClient, cfg, logger); err != nil {
 		logger.Fatalf("Sync failed: %v", err)
 	}
 
@@ -425,7 +419,11 @@ func performDataSync(ctx context.Context, srcClient, dstClient *starrocks.Client
 	logger.Infof("Executing Flight SQL query: %s", query)
 
 	// 执行Flight SQL查询并获取Arrow流
-	flightInfo, err := srcClient.ExecuteQuery(ctx, query)
+	authCtx, err := srcClient.AuthenticateBasicToken(ctx)
+	if err != nil {
+		return fmt.Errorf("Flight SQL authentication failed: %w", err)
+	}
+	flightInfo, err := srcClient.ExecuteQuery(authCtx, query)
 	if err != nil {
 		return fmt.Errorf("failed to execute Flight SQL query: %w", err)
 	}
@@ -438,7 +436,7 @@ func performDataSync(ctx context.Context, srcClient, dstClient *starrocks.Client
 		logger.Infof("Processing endpoint %d/%d...", i+1, len(flightInfo.Endpoint))
 
 		// 获取端点的数据流 - 使用与查询相同的上下文
-		stream, err := srcClient.DoGet(ctx, endpoint.Ticket)
+		stream, err := srcClient.DoGet(authCtx, endpoint.Ticket)
 		if err != nil {
 			logger.Warnf("Failed to get data from endpoint %d: %v", i, err)
 			continue
@@ -446,50 +444,72 @@ func performDataSync(ctx context.Context, srcClient, dstClient *starrocks.Client
 
 		// 读取并转发Arrow记录
 		recordCount := 0
-		for {
-			flightData, err := stream.Recv()
-			if err != nil {
-				if err.Error() == "EOF" {
-					break
-				}
-				return fmt.Errorf("failed to receive Flight data: %w", err)
-			}
+		for stream.Next() {
+			// 获取当前的 Arrow Record Batch
+			record := stream.Record()
 
-			if flightData.DataBody == nil || len(flightData.DataBody) == 0 {
-				logger.Debugf("Received empty data body, continuing...")
+			// 确保 record 不为 nil
+			if record == nil {
 				continue
 			}
 
+			// 转发到目标写入器
+			if err := writer.WriteArrowRecord(ctx, record); err != nil {
+				stream.Release()
+				return fmt.Errorf("failed to write Arrow record: %w", err)
+			}
+
+			totalRows += record.NumRows()
+			recordCount++
+
+			// flightData, err := stream.Recv()
+			// if err != nil {
+			// 	if err.Error() == "EOF" {
+			// 		break
+			// 	}
+			// 	return fmt.Errorf("failed to receive Flight data: %w", err)
+			// }
+
+			// if flightData.DataBody == nil || len(flightData.DataBody) == 0 {
+			// 	logger.Debugf("Received empty data body, continuing...")
+			// 	continue
+			// }
+
 			// 解析Arrow数据
-			reader := bytes.NewReader(flightData.DataBody)
-			ipcReader, err := ipc.NewReader(reader)
-			if err != nil {
-				return fmt.Errorf("failed to create IPC reader: %w", err)
-			}
+			// reader := bytes.NewReader(flightData.DataBody)
+			// ipcReader, err := ipc.NewReader(reader)
+			// if err != nil {
+			// 	return fmt.Errorf("failed to create IPC reader: %w", err)
+			// }
 
-			for ipcReader.Next() {
-				record := ipcReader.Record()
-				if record != nil {
-					record.Retain()
+			// for ipcReader.Next() {
+			// 	record := ipcReader.Record()
+			// 	if record != nil {
+			// 		record.Retain()
 
-					// 写入到目标表
-					if err := writer.WriteArrowRecord(ctx, record); err != nil {
-						record.Release()
-						ipcReader.Release()
-						return fmt.Errorf("failed to write Arrow record: %w", err)
-					}
+			// 		// 写入到目标表
+			// 		if err := writer.WriteArrowRecord(ctx, record); err != nil {
+			// 			record.Release()
+			// 			ipcReader.Release()
+			// 			return fmt.Errorf("failed to write Arrow record: %w", err)
+			// 		}
 
-					totalRows += record.NumRows()
-					recordCount++
-					logger.Debugf("Transferred record %d with %d rows", recordCount, record.NumRows())
+			// 		totalRows += record.NumRows()
+			// 		recordCount++
+			// 		logger.Debugf("Transferred record %d with %d rows", recordCount, record.NumRows())
 
-					record.Release()
-				}
-			}
-			ipcReader.Release()
+			// 		record.Release()
+			// 	}
+			// }
+			// ipcReader.Release()
+		}
+
+		if err := stream.Err(); err != nil {
+			logger.Warnf("Stream error on endpoint %d: %v", i, err)
 		}
 
 		logger.Infof("Endpoint %d processed: %d records", i+1, recordCount)
+		stream.Release()
 	}
 
 	// 完成写入

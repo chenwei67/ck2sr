@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/apache/arrow/go/v14/arrow"
+	"github.com/apache/arrow/go/v18/arrow"
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 

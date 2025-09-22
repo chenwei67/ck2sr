@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apache/arrow/go/v14/arrow"
+	"github.com/apache/arrow/go/v18/arrow"
 	"github.com/ck2sr/ck2sr/internal/config"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"

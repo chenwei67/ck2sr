@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apache/arrow/go/v14/arrow"
+	"github.com/apache/arrow/go/v18/arrow"
 )
 
 // TestGenerateDataCommand 测试数据生成命令

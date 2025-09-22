@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/apache/arrow/go/v14/arrow"
-	"github.com/apache/arrow/go/v14/arrow/flight"
+	"github.com/apache/arrow/go/v18/arrow"
+	"github.com/apache/arrow/go/v18/arrow/flight"
 	"github.com/ck2sr/ck2sr/pkg/starrocks"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc/metadata"

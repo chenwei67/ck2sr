@@ -11,12 +11,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/apache/arrow/go/v14/arrow"
-	"github.com/apache/arrow/go/v14/arrow/array"
-	"github.com/apache/arrow/go/v14/arrow/flight"
-	"github.com/apache/arrow/go/v14/arrow/flight/flightsql"
-	"github.com/apache/arrow/go/v14/arrow/ipc"
-	"github.com/apache/arrow/go/v14/arrow/memory"
+	"github.com/apache/arrow/go/v18/arrow"
+	"github.com/apache/arrow/go/v18/arrow/array"
+	"github.com/apache/arrow/go/v18/arrow/flight"
+	"github.com/apache/arrow/go/v18/arrow/flight/flightsql"
+	"github.com/apache/arrow/go/v18/arrow/ipc"
+	"github.com/apache/arrow/go/v18/arrow/memory"
 	_ "github.com/go-sql-driver/mysql"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -32,7 +32,6 @@ type Client struct {
 	db           *sql.DB
 	flightClient flight.Client     // 用于认证
 	sqlClient    *flightsql.Client // 包括 flight.Client
-	AuthCtx      context.Context
 	config       *config.StarRocksConfig
 	logger       *logrus.Logger
 	allocator    memory.Allocator
@@ -185,7 +184,6 @@ func NewClient(cfg *config.StarRocksConfig, logger *logrus.Logger) (*Client, err
 	var flightClient flight.Client
 	var sqlClient *flightsql.Client
 
-	authCtx := context.Background() // 适配认证的上下文，认证后会更新
 	// 只有配置了FlightSQLEndpoint才创建Flight SQL连接
 	if cfg.FlightSQLEndpoint != "" {
 		// 设置 Flight SQL 连接
@@ -217,12 +215,11 @@ func NewClient(cfg *config.StarRocksConfig, logger *logrus.Logger) (*Client, err
 
 		// 认证处理
 		if cfg.FlightSQLAuth.Username != "" || cfg.FlightSQLAuth.Password != "" {
-			ctx, err := flightClient.AuthenticateBasicToken(context.Background(), cfg.FlightSQLAuth.Username, cfg.FlightSQLAuth.Password)
+			_, err := flightClient.AuthenticateBasicToken(context.Background(), cfg.FlightSQLAuth.Username, cfg.FlightSQLAuth.Password)
 			if err != nil {
 				flightClient.Close()
 				return nil, fmt.Errorf("failed to authenticate Flight client: %w", err)
 			}
-			authCtx = ctx
 		} else {
 			logger.Info("StarRocks Flight SQL authentication disabled (no flight_sql_auth username/password provided)")
 		}
@@ -242,13 +239,20 @@ func NewClient(cfg *config.StarRocksConfig, logger *logrus.Logger) (*Client, err
 		db:           db,
 		flightClient: flightClient,
 		sqlClient:    sqlClient,
-		AuthCtx:      authCtx,
 		config:       cfg,
 		logger:       logger,
 		allocator:    allocator,
 	}
 
 	return client, nil
+}
+
+// 再次认证
+func (c *Client) AuthenticateBasicToken(ctx context.Context) (context.Context, error) {
+	if c.config.FlightSQLAuth.Username != "" || c.config.FlightSQLAuth.Password != "" {
+		return c.sqlClient.Client.AuthenticateBasicToken(ctx, c.config.FlightSQLAuth.Username, c.config.FlightSQLAuth.Password)
+	}
+	return ctx, nil
 }
 
 // Close 关闭连接
@@ -1095,10 +1099,14 @@ func (c *Client) TestConnection(ctx context.Context) error {
 	// 仅在配置了 Flight SQL 时测试 Flight SQL 连接
 	if c.sqlClient != nil {
 		c.logger.Debug("Testing Flight SQL connection...")
-		if _, err := c.sqlClient.Execute(ctx, "SELECT 1"); err != nil {
+		authCtx, err := c.AuthenticateBasicToken(ctx)
+		if err != nil {
+			return fmt.Errorf("Flight SQL authentication failed: %w", err)
+		}
+		if _, err := c.sqlClient.Execute(authCtx, "SELECT 1"); err != nil {
 			c.logger.Warnf("Flight SQL connection test failed: %v", err)
 			// 尝试其他简单查询
-			if _, err2 := c.sqlClient.Execute(ctx, "SHOW TABLES LIMIT 1"); err2 != nil {
+			if _, err2 := c.sqlClient.Execute(authCtx, "SHOW TABLES LIMIT 1"); err2 != nil {
 				c.logger.Errorf("Flight SQL connection test completely failed: %v", err2)
 				return err2
 			} else {
@@ -1504,17 +1512,8 @@ func (c *Client) ExecuteQuery(ctx context.Context, query string) (*flight.Flight
 
 	c.logger.Debugf("Executing Flight SQL query: %s", query)
 
-	// 确保使用认证上下文执行查询
-	execCtx := ctx
-	if c.AuthCtx != nil {
-		execCtx = c.AuthCtx
-		c.logger.Debugf("Using authenticated context for ExecuteQuery operation")
-	} else {
-		c.logger.Warnf("No authenticated context available, using provided context")
-	}
-
 	// 使用Flight SQL客户端执行查询
-	flightInfo, err := c.sqlClient.Execute(execCtx, query)
+	flightInfo, err := c.sqlClient.Execute(ctx, query)
 	if err != nil {
 		c.logger.Errorf("Failed to execute Flight SQL query: %v", err)
 		return nil, fmt.Errorf("failed to execute Flight SQL query: %w", err)
@@ -1525,24 +1524,15 @@ func (c *Client) ExecuteQuery(ctx context.Context, query string) (*flight.Flight
 }
 
 // DoGet 从指定的ticket获取Arrow数据流
-func (c *Client) DoGet(ctx context.Context, ticket *flight.Ticket) (flight.FlightService_DoGetClient, error) {
+func (c *Client) DoGet(ctx context.Context, ticket *flight.Ticket) (*flight.Reader, error) {
 	if c.flightClient == nil {
 		return nil, fmt.Errorf("Flight client not initialized - this operation requires Flight SQL configuration")
 	}
 
 	c.logger.Debugf("Getting data from Flight ticket")
 
-	// 确保使用认证上下文获取数据流 - 关键修复
-	doGetCtx := ctx
-	if c.AuthCtx != nil {
-		doGetCtx = c.AuthCtx
-		c.logger.Debugf("Using authenticated context for DoGet operation")
-	} else {
-		c.logger.Warnf("No authenticated context available, using provided context")
-	}
-
 	// 使用Flight客户端获取数据流，必须使用相同的认证上下文
-	stream, err := c.flightClient.DoGet(doGetCtx, ticket)
+	stream, err := c.sqlClient.DoGet(ctx, ticket)
 	if err != nil {
 		c.logger.Errorf("Failed to get data stream from ticket: %v", err)
 		return nil, fmt.Errorf("failed to get data from ticket: %w", err)

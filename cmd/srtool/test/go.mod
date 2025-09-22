@@ -5,7 +5,7 @@ go 1.25.1
 replace github.com/ck2sr/ck2sr => ../../../
 
 require (
-	github.com/apache/arrow/go/v14 v14.0.2
+	github.com/apache/arrow/go/v18 latest
 	github.com/ck2sr/ck2sr v0.0.0-00010101000000-000000000000
 	github.com/sirupsen/logrus v1.9.3
 )
