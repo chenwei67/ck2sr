@@ -21,7 +21,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 
 	"github.com/ck2sr/ck2sr/internal/config"
@@ -31,8 +30,9 @@ import (
 // Client StarRocks 客户端
 type Client struct {
 	db           *sql.DB
-	flightClient flight.Client
-	sqlClient    *flightsql.Client
+	flightClient flight.Client     // 用于认证
+	sqlClient    *flightsql.Client // 包括 flight.Client
+	AuthCtx      context.Context
 	config       *config.StarRocksConfig
 	logger       *logrus.Logger
 	allocator    memory.Allocator
@@ -81,6 +81,59 @@ func (a *authInterceptor) addAuthToContext(ctx context.Context) context.Context 
 	return ctx
 }
 
+// BasicAuthHandler 实现 Flight 客户端 BasicAuth 认证处理器
+type BasicAuthHandler struct {
+	username string
+	password string
+	token    string
+}
+
+// NewBasicAuthHandler 创建新的 BasicAuth 处理器
+func NewBasicAuthHandler(username, password string) *BasicAuthHandler {
+	return &BasicAuthHandler{
+		username: username,
+		password: password,
+	}
+}
+
+// Authenticate 实现 ClientAuthHandler 接口的认证方法
+func (h *BasicAuthHandler) Authenticate(ctx context.Context, authConn flight.AuthConn) error {
+	// 构建Basic Auth凭据
+	auth := base64.StdEncoding.EncodeToString([]byte(h.username + ":" + h.password))
+	payload := []byte("Basic " + auth)
+
+	// 发送认证凭据
+	if err := authConn.Send(payload); err != nil {
+		return fmt.Errorf("failed to send basic auth credentials: %w", err)
+	}
+
+	// 读取服务器响应
+	response, err := authConn.Read()
+	if err != nil {
+		return fmt.Errorf("failed to read auth response: %w", err)
+	}
+
+	// 保存认证令牌（服务器响应）
+	if len(response) > 0 {
+		h.token = string(response)
+	} else {
+		// 如果没有返回令牌，使用Basic Auth字符串作为令牌
+		h.token = "Basic " + auth
+	}
+
+	return nil
+}
+
+// GetToken 获取认证令牌
+func (h *BasicAuthHandler) GetToken(ctx context.Context) (string, error) {
+	if h.token == "" {
+		// 如果没有令牌，返回Basic Auth字符串
+		auth := base64.StdEncoding.EncodeToString([]byte(h.username + ":" + h.password))
+		return "Basic " + auth, nil
+	}
+	return h.token, nil
+}
+
 // NewClient 创建新的 StarRocks 客户端
 func NewClient(cfg *config.StarRocksConfig, logger *logrus.Logger) (*Client, error) {
 	if logger == nil {
@@ -90,149 +143,111 @@ func NewClient(cfg *config.StarRocksConfig, logger *logrus.Logger) (*Client, err
 
 	// 创建内存分配器
 	allocator := memory.NewGoAllocator()
-
+	var db *sql.DB
 	// 构建 MySQL 连接字符串（用于元数据查询）
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&timeout=30s",
-		cfg.Username, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
-
-	// 建立 MySQL 连接
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open StarRocks MySQL connection: %w", err)
-	}
-
-	// 设置连接池参数
-	db.SetMaxOpenConns(cfg.MaxOpenConns)
-	db.SetMaxIdleConns(cfg.MaxIdleConns)
-	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
-
-	// 测试 MySQL 连接
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to ping StarRocks MySQL: %w", err)
-	}
-
-	// 设置 Flight SQL 连接
-	flightEndpoint := fmt.Sprintf("%s:%d", cfg.FlightSQLEndpoint, cfg.FlightSQLPort)
-
-	var dialOpts []grpc.DialOption
-
-	// 设置 gRPC 消息大小限制，防止 "frame too large" 错误
-	maxMsgSize := cfg.MaxMessageSize * 1024 * 1024 // 配置值单位为MB，转换为字节
-	if maxMsgSize <= 0 {
-		maxMsgSize = 100 * 1024 * 1024 // 默认 100MB
-	}
-
-	// HTTP/2 协议安全的窗口大小配置
-	// 避免 "frame too large" 错误的关键配置
-	const maxSafeWindowSize = 16 * 1024 * 1024 // 16MB - HTTP/2 安全限制
-	const maxSafeBufferSize = 4 * 1024 * 1024  // 4MB - 缓冲区安全限制
-
-	initialWindowSize := int32(maxSafeWindowSize)
-	if maxMsgSize < maxSafeWindowSize {
-		initialWindowSize = int32(maxMsgSize)
-	}
-	if initialWindowSize < 65536 {
-		initialWindowSize = 65536 // 最小 64KB
-	}
-
-	// 计算安全的缓冲区大小
-	bufferSize := maxSafeBufferSize
-	if maxMsgSize/8 < maxSafeBufferSize { // 使用消息大小的1/8作为缓冲区
-		bufferSize = maxMsgSize / 8
-	}
-	if bufferSize < 32768 {
-		bufferSize = 32768 // 最小 32KB
-	}
-
-	dialOpts = append(dialOpts,
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(maxMsgSize),
-			grpc.MaxCallSendMsgSize(maxMsgSize),
-		),
-		grpc.WithInitialWindowSize(initialWindowSize),
-		grpc.WithInitialConnWindowSize(initialWindowSize),
-		grpc.WithWriteBufferSize(bufferSize),
-		grpc.WithReadBufferSize(bufferSize),
-		// 添加 HTTP/2 相关的安全选项
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                10 * time.Second, // 发送 keepalive ping 的间隔
-			Timeout:             3 * time.Second,  // 等待 keepalive ping 响应的超时时间
-			PermitWithoutStream: true,             // 允许在没有活动流时发送 keepalive ping
-		}),
-	)
-
-	logger.Infof("StarRocks Flight SQL client configured - max message: %d MB, window size: %d KB, buffer size: %d KB",
-		maxMsgSize/(1024*1024), initialWindowSize/1024, bufferSize/1024)
-
-	if cfg.UseTLS {
-		// 配置 TLS
-		tlsConfig := &tls.Config{
-			ServerName: cfg.FlightSQLEndpoint,
+	if cfg.Host != "" && cfg.Port != 0 {
+		var dsn string
+		if cfg.Username != "" && cfg.Password != "" {
+			dsn = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&timeout=30s",
+				cfg.Username, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
+		} else if cfg.Username != "" {
+			dsn = fmt.Sprintf("%s@tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&timeout=30s",
+				cfg.Username, cfg.Host, cfg.Port, cfg.Database)
+		} else {
+			dsn = fmt.Sprintf("tcp(%s:%d)/%s?charset=utf8mb4&parseTime=true&timeout=30s",
+				cfg.Host, cfg.Port, cfg.Database)
 		}
-		if cfg.TLSCAFile != "" || cfg.TLSCertFile != "" {
-			// 可以添加证书配置
+
+		// 建立 MySQL 连接
+		var err error
+		db, err = sql.Open("mysql", dsn)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open StarRocks MySQL connection: %w", err)
 		}
-		dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
+
+		// 设置连接池参数
+		db.SetMaxOpenConns(cfg.MaxOpenConns)
+		db.SetMaxIdleConns(cfg.MaxIdleConns)
+		db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
+
+		// 测试 MySQL 连接
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := db.PingContext(ctx); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("failed to ping StarRocks MySQL: %w", err)
+		}
 	} else {
-		dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		logger.Warn("StarRocks MySQL endpoint not configured, skipping MySQL connection")
 	}
 
-	// 添加认证拦截器
-	if cfg.FlightSQLAuth.Username != "" || cfg.FlightSQLAuth.Password != "" {
-		auth := newAuthInterceptor(cfg.FlightSQLAuth.Username, cfg.FlightSQLAuth.Password)
-		dialOpts = append(dialOpts,
-			grpc.WithUnaryInterceptor(auth.UnaryInterceptor),
-			grpc.WithStreamInterceptor(auth.StreamInterceptor),
-		)
-		logger.Infof("StarRocks Flight SQL authentication enabled for user: %s", func() string {
-			if cfg.FlightSQLAuth.Username == "" {
-				return "<empty>"
+	var flightClient flight.Client
+	var sqlClient *flightsql.Client
+
+	authCtx := context.Background() // 适配认证的上下文，认证后会更新
+	// 只有配置了FlightSQLEndpoint才创建Flight SQL连接
+	if cfg.FlightSQLEndpoint != "" {
+		// 设置 Flight SQL 连接
+		flightEndpoint := fmt.Sprintf("%s:%d", cfg.FlightSQLEndpoint, cfg.FlightSQLPort)
+		var dialOpts []grpc.DialOption
+
+		if cfg.UseTLS {
+			// 配置 TLS
+			tlsConfig := &tls.Config{
+				ServerName: cfg.FlightSQLEndpoint,
 			}
-			return cfg.FlightSQLAuth.Username
-		}())
+			if cfg.TLSCAFile != "" || cfg.TLSCertFile != "" {
+				// 可以添加证书配置
+			}
+			dialOpts = append(dialOpts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
+		} else {
+			dialOpts = append(dialOpts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		}
+
+		// 创建 Flight 客户端
+		fc, err := flight.NewClientWithMiddleware(flightEndpoint, nil, nil, dialOpts...)
+		if err != nil {
+			if db != nil {
+				db.Close()
+			}
+			return nil, fmt.Errorf("failed to create Flight client: %w", err)
+		}
+		flightClient = fc
+
+		// 认证处理
+		if cfg.FlightSQLAuth.Username != "" || cfg.FlightSQLAuth.Password != "" {
+			ctx, err := flightClient.AuthenticateBasicToken(context.Background(), cfg.FlightSQLAuth.Username, cfg.FlightSQLAuth.Password)
+			if err != nil {
+				flightClient.Close()
+				return nil, fmt.Errorf("failed to authenticate Flight client: %w", err)
+			}
+			authCtx = ctx
+		} else {
+			logger.Info("StarRocks Flight SQL authentication disabled (no flight_sql_auth username/password provided)")
+		}
+
+		// 创建 Flight SQL 客户端
+		sqlClient = &flightsql.Client{Client: flightClient, Alloc: allocator}
+
+		// 测试 Flight SQL 连接 (可选，如果认证有问题可以跳过)
+		logger.Info("Skipping Flight SQL connection test during client creation")
+
+		logger.Infof("Connected to StarRocks via Flight SQL at %s", flightEndpoint)
 	} else {
-		logger.Info("StarRocks Flight SQL authentication disabled (no flight_sql_auth username/password provided)")
+		logger.Info("Flight SQL not configured, using MySQL-only mode")
 	}
-
-	// 创建 Flight 客户端
-	flightClient, err := flight.NewClientWithMiddleware(flightEndpoint, nil, nil, dialOpts...)
-	if err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to create Flight client: %w", err)
-	}
-
-	// 创建 Flight SQL 客户端
-	sqlClient, err := flightsql.NewClient(flightEndpoint, nil, nil, dialOpts...)
-	if err != nil {
-		flightClient.Close()
-		db.Close()
-		return nil, fmt.Errorf("failed to create Flight SQL client: %w", err)
-	}
-
-	// 测试 Flight SQL 连接 (可选，如果认证有问题可以跳过)
-	logger.Info("Skipping Flight SQL connection test during client creation")
-	// 可以在实际使用时再验证连接
-	// ctx, cancel = context.WithTimeout(context.Background(), cfg.FlightTimeout)
-	// defer cancel()
-	// if _, err := sqlClient.Execute(ctx, "SELECT 1"); err != nil {
-	//     logger.Warnf("Flight SQL connection test failed: %v", err)
-	//     // 不要因为测试失败就退出，让实际使用时再处理
-	// }
 
 	client := &Client{
 		db:           db,
 		flightClient: flightClient,
 		sqlClient:    sqlClient,
+		AuthCtx:      authCtx,
 		config:       cfg,
 		logger:       logger,
 		allocator:    allocator,
 	}
 
-	logger.Infof("Connected to StarRocks via Flight SQL at %s", flightEndpoint)
 	return client, nil
 }
 
@@ -352,6 +367,7 @@ func (c *Client) getTableColumns(ctx context.Context, tableName string) ([]Colum
 		ORDER BY ORDINAL_POSITION
 	`
 
+	c.logger.Infof("Querying table columns with: query(%s), schema(%s), table(%s) ", query, c.config.Database, tableName)
 	rows, err := c.db.QueryContext(ctx, query, c.config.Database, tableName)
 	if err != nil {
 		return nil, err
@@ -363,13 +379,14 @@ func (c *Client) getTableColumns(ctx context.Context, tableName string) ([]Colum
 		var col ColumnInfo
 		var defaultValue sql.NullString
 		var columnKey string
+		var isNullable string
 
 		err := rows.Scan(
 			&col.Name,
 			&col.Type,
 			&defaultValue,
 			&col.Comment,
-			&col.IsNullable,
+			&isNullable,
 			&columnKey,
 		)
 		if err != nil {
@@ -380,6 +397,17 @@ func (c *Client) getTableColumns(ctx context.Context, tableName string) ([]Colum
 			col.DefaultValue = defaultValue.String
 		}
 		col.IsPrimaryKey = (columnKey == "PRI")
+		col.IsNullable = (isNullable == "YES")
+
+		// 处理StarRocks中BOOLEAN类型可能被存储为tinyint(1)的情况
+		// 检查列名包含boolean关键字或者类型为tinyint(1)的情况
+		if (col.Type == "tinyint" && (strings.Contains(strings.ToLower(col.Name), "boolean") ||
+			strings.Contains(strings.ToLower(col.Name), "bool") ||
+			strings.HasSuffix(strings.ToLower(col.Name), "_flag") ||
+			strings.HasSuffix(strings.ToLower(col.Name), "_active"))) ||
+			strings.Contains(col.Type, "tinyint(1)") {
+			col.Type = "BOOLEAN"
+		}
 
 		columns = append(columns, col)
 	}
@@ -396,6 +424,18 @@ type ArrowDataWriter struct {
 	batchSize     int
 	currentRows   int
 	columnMapping map[string]string
+}
+
+// ArrowStreamWriter Arrow 流式写入器 - 零拷贝流式传输
+type ArrowStreamWriter struct {
+	client        *Client
+	tableName     string
+	targetSchema  *arrow.Schema
+	flightStream  flight.FlightService_DoPutClient
+	totalRecords  int64
+	totalRows     int64
+	totalBytes    int64
+	isInitialized bool
 }
 
 // ArrowWriteResult Arrow 写入结果
@@ -483,24 +523,26 @@ func (c *Client) convertStarRocksTypeToArrow(starRocksType string) (arrow.DataTy
 	upperType := strings.ToUpper(starRocksType)
 
 	switch {
-	case strings.Contains(upperType, "TINYINT"):
-		return arrow.PrimitiveTypes.Int8, nil
-	case strings.Contains(upperType, "SMALLINT"):
-		return arrow.PrimitiveTypes.Int16, nil
-	case strings.Contains(upperType, "INT") || strings.Contains(upperType, "INTEGER"):
-		return arrow.PrimitiveTypes.Int32, nil
+	// 优先检查BOOLEAN类型（包括被转换过的）
+	case strings.Contains(upperType, "BOOLEAN") || strings.Contains(upperType, "BOOL"):
+		return arrow.FixedWidthTypes.Boolean, nil
 	case strings.Contains(upperType, "BIGINT"):
 		return arrow.PrimitiveTypes.Int64, nil
+	case strings.Contains(upperType, "SMALLINT"):
+		return arrow.PrimitiveTypes.Int16, nil
+	case strings.Contains(upperType, "TINYINT"):
+		return arrow.PrimitiveTypes.Int8, nil
+	case strings.Contains(upperType, "INT") || strings.Contains(upperType, "INTEGER"):
+		return arrow.PrimitiveTypes.Int32, nil
 	case strings.Contains(upperType, "FLOAT"):
 		return arrow.PrimitiveTypes.Float32, nil
 	case strings.Contains(upperType, "DOUBLE"):
 		return arrow.PrimitiveTypes.Float64, nil
-	case strings.Contains(upperType, "BOOLEAN"):
-		return arrow.FixedWidthTypes.Boolean, nil
-	case strings.Contains(upperType, "DATE"):
-		return arrow.FixedWidthTypes.Date32, nil
+	// 先检查DATETIME和TIMESTAMP，再检查DATE，避免DATE匹配到DATETIME
 	case strings.Contains(upperType, "DATETIME") || strings.Contains(upperType, "TIMESTAMP"):
 		return arrow.FixedWidthTypes.Timestamp_us, nil
+	case strings.Contains(upperType, "DATE"):
+		return arrow.FixedWidthTypes.Date32, nil
 	case strings.Contains(upperType, "VARCHAR") || strings.Contains(upperType, "CHAR") || strings.Contains(upperType, "TEXT"):
 		return arrow.BinaryTypes.String, nil
 	default:
@@ -519,7 +561,7 @@ func (dw *ArrowDataWriter) WriteRowMap(rowData map[string]interface{}) error {
 		}
 
 		if err := dw.appendValueToBuilder(i, value, field.Type); err != nil {
-			return fmt.Errorf("failed to append value for field %s: %w", field.Name, err)
+			return fmt.Errorf("failed to append value for index(%d) value(%v) field %s: %w", i, value, field.Name, err)
 		}
 	}
 
@@ -588,6 +630,18 @@ func (dw *ArrowDataWriter) appendValueToBuilder(fieldIndex int, value interface{
 			builder.Append(v)
 		} else {
 			return fmt.Errorf("invalid value type for string: %T, error: %w", value, err)
+		}
+	case *array.Date32Builder:
+		if v, err := convertToDate32(value); err == nil {
+			builder.Append(v)
+		} else {
+			return fmt.Errorf("invalid value type for date32: %T, error: %w", value, err)
+		}
+	case *array.TimestampBuilder:
+		if v, err := convertToTimestamp(value); err == nil {
+			builder.Append(v)
+		} else {
+			return fmt.Errorf("invalid value type for timestamp: %T, error: %w", value, err)
 		}
 	default:
 		return fmt.Errorf("unsupported builder type: %T", builder)
@@ -718,8 +772,186 @@ func convertToString(value interface{}) (string, error) {
 	}
 }
 
+func convertToDate32(value interface{}) (arrow.Date32, error) {
+	switch v := value.(type) {
+	case arrow.Date32:
+		return v, nil
+	case string:
+		// 解析日期字符串格式 YYYY-MM-DD
+		if t, err := time.Parse("2006-01-02", v); err == nil {
+			daysSinceEpoch := arrow.Date32(t.Unix() / 86400)
+			return daysSinceEpoch, nil
+		}
+		return 0, fmt.Errorf("invalid date format: %s", v)
+	case time.Time:
+		daysSinceEpoch := arrow.Date32(v.Unix() / 86400)
+		return daysSinceEpoch, nil
+	}
+	return 0, fmt.Errorf("cannot convert %T to arrow.Date32", value)
+}
+
+func convertToTimestamp(value interface{}) (arrow.Timestamp, error) {
+	switch v := value.(type) {
+	case arrow.Timestamp:
+		return v, nil
+	case string:
+		// 解析日期时间字符串格式 YYYY-MM-DD HH:MM:SS
+		if t, err := time.Parse("2006-01-02 15:04:05", v); err == nil {
+			return arrow.Timestamp(t.UnixMicro()), nil
+		}
+		return 0, fmt.Errorf("invalid datetime format: %s", v)
+	case time.Time:
+		return arrow.Timestamp(v.UnixMicro()), nil
+	case int64:
+		// Unix微秒时间戳
+		return arrow.Timestamp(v), nil
+	}
+	return 0, fmt.Errorf("cannot convert %T to arrow.Timestamp", value)
+}
+
 // WriteRecord 写入 Arrow Record
 func (dw *ArrowDataWriter) WriteRecord(record arrow.Record) error {
+	// 检查是否有可用的 Flight 客户端
+	if dw.client.flightClient == nil {
+		// 使用 MySQL 协议进行数据写入
+		return dw.writeRecordViaMySQL(record)
+	}
+
+	// 使用 Arrow Flight 协议进行数据写入
+	return dw.writeRecordViaFlight(record)
+}
+
+// writeRecordViaMySQL 通过 MySQL 协议写入 Arrow Record
+func (dw *ArrowDataWriter) writeRecordViaMySQL(record arrow.Record) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// 构建批量 INSERT 语句
+	if record.NumRows() == 0 {
+		return nil
+	}
+
+	// 构建列名列表
+	columnNames := make([]string, record.NumCols())
+	for i := int64(0); i < record.NumCols(); i++ {
+		columnNames[i] = fmt.Sprintf("`%s`", record.ColumnName(int(i)))
+	}
+
+	// 构建值列表 (不使用预处理语句，直接拼接SQL值)
+	valueParts := make([]string, record.NumRows())
+
+	// 处理每一行数据
+	for rowIdx := int64(0); rowIdx < record.NumRows(); rowIdx++ {
+		rowValues := make([]string, record.NumCols())
+
+		// 处理每一列
+		for colIdx := int64(0); colIdx < record.NumCols(); colIdx++ {
+			col := record.Column(int(colIdx))
+
+			var sqlValue string
+			if col.IsNull(int(rowIdx)) {
+				sqlValue = "NULL"
+			} else {
+				// 根据列类型转换值并格式化为SQL字符串
+				value := extractValueFromArrowArray(col, int(rowIdx))
+				sqlValue = formatValueForSQL(value)
+			}
+
+			rowValues[colIdx] = sqlValue
+		}
+
+		valueParts[rowIdx] = fmt.Sprintf("(%s)", strings.Join(rowValues, ","))
+	}
+
+	// 构建完整的 INSERT 语句（不使用预处理语句）
+	insertSQL := fmt.Sprintf("INSERT INTO `%s` (%s) VALUES %s",
+		dw.tableName,
+		strings.Join(columnNames, ","),
+		strings.Join(valueParts, ","))
+
+	// 执行 INSERT 语句（不使用预处理语句参数）
+	_, err := dw.client.db.ExecContext(ctx, insertSQL)
+	if err != nil {
+		return fmt.Errorf("failed to execute MySQL INSERT(%s): %w", insertSQL, err)
+	}
+
+	dw.client.logger.Debugf("Successfully inserted %d rows via MySQL protocol", record.NumRows())
+	return nil
+}
+
+// formatValueForSQL 将Go值格式化为SQL字符串
+func formatValueForSQL(value interface{}) string {
+	switch v := value.(type) {
+	case nil:
+		return "NULL"
+	case bool:
+		if v {
+			return "1"
+		}
+		return "0"
+	case int8:
+		return fmt.Sprintf("%d", v)
+	case int16:
+		return fmt.Sprintf("%d", v)
+	case int32:
+		return fmt.Sprintf("%d", v)
+	case int64:
+		return fmt.Sprintf("%d", v)
+	case float32:
+		return fmt.Sprintf("%g", v)
+	case float64:
+		return fmt.Sprintf("%g", v)
+	case string:
+		// 转义SQL字符串中的单引号和反斜杠
+		escaped := strings.ReplaceAll(v, "\\", "\\\\")
+		escaped = strings.ReplaceAll(escaped, "'", "\\'")
+		return fmt.Sprintf("'%s'", escaped)
+	default:
+		// 对于其他类型，转换为字符串并转义
+		str := fmt.Sprintf("%v", v)
+		escaped := strings.ReplaceAll(str, "\\", "\\\\")
+		escaped = strings.ReplaceAll(escaped, "'", "\\'")
+		return fmt.Sprintf("'%s'", escaped)
+	}
+}
+
+// extractValueFromArrowArray 从Arrow数组中提取指定索引的值
+func extractValueFromArrowArray(col arrow.Array, rowIdx int) interface{} {
+	switch arr := col.(type) {
+	case *array.Boolean:
+		return arr.Value(rowIdx)
+	case *array.Int8:
+		return arr.Value(rowIdx)
+	case *array.Int16:
+		return arr.Value(rowIdx)
+	case *array.Int32:
+		return arr.Value(rowIdx)
+	case *array.Int64:
+		return arr.Value(rowIdx)
+	case *array.Float32:
+		return arr.Value(rowIdx)
+	case *array.Float64:
+		return arr.Value(rowIdx)
+	case *array.String:
+		return arr.Value(rowIdx)
+	case *array.Date32:
+		// 转换 Date32 为日期字符串
+		days := arr.Value(rowIdx)
+		date := time.Unix(int64(days)*86400, 0).UTC()
+		return date.Format("2006-01-02")
+	case *array.Timestamp:
+		// 转换 Timestamp 为日期时间字符串
+		micros := arr.Value(rowIdx)
+		timestamp := time.UnixMicro(int64(micros)).UTC()
+		return timestamp.Format("2006-01-02 15:04:05")
+	default:
+		// 对于未知类型，尝试转换为字符串
+		return fmt.Sprintf("%v", col.GetOneForMarshal(rowIdx))
+	}
+}
+
+// writeRecordViaFlight 通过 Arrow Flight 协议写入 Arrow Record
+func (dw *ArrowDataWriter) writeRecordViaFlight(record arrow.Record) error {
 	ctx, cancel := context.WithTimeout(context.Background(), dw.client.config.FlightTimeout)
 	defer cancel()
 
@@ -761,7 +993,7 @@ func (dw *ArrowDataWriter) WriteRecord(record arrow.Record) error {
 		return fmt.Errorf("failed to receive put result: %w", err)
 	}
 
-	dw.client.logger.Debugf("Wrote %d rows to table %s", record.NumRows(), dw.tableName)
+	dw.client.logger.Debugf("Wrote %d rows to table %s via Flight protocol", record.NumRows(), dw.tableName)
 	return nil
 }
 
@@ -849,19 +1081,34 @@ func (c *Client) CalculateChecksum(ctx context.Context, tableName string, column
 // TestConnection 测试连接
 func (c *Client) TestConnection(ctx context.Context) error {
 	// 测试 MySQL 连接
-	if err := c.db.PingContext(ctx); err != nil {
-		return fmt.Errorf("MySQL connection test failed: %w", err)
+	if c.db != nil {
+		if err := c.db.PingContext(ctx); err != nil {
+			c.logger.Errorf("MySQL connection test failed: %v", err)
+			return err
+		} else {
+			c.logger.Debug("MySQL connection test successful")
+		}
+	} else {
+		c.logger.Debug("MySQL connection not configured, skipping MySQL connection test")
 	}
 
-	// 测试 Flight SQL 连接 - 使用更宽松的测试
-	c.logger.Debug("Testing Flight SQL connection...")
-	if _, err := c.sqlClient.Execute(ctx, "SELECT 1"); err != nil {
-		c.logger.Warnf("Flight SQL connection test failed: %v", err)
-		// 尝试其他简单查询
-		if _, err2 := c.sqlClient.Execute(ctx, "SHOW TABLES LIMIT 1"); err2 != nil {
-			return fmt.Errorf("Flight SQL connection test failed with multiple queries: %w (original: %v)", err2, err)
+	// 仅在配置了 Flight SQL 时测试 Flight SQL 连接
+	if c.sqlClient != nil {
+		c.logger.Debug("Testing Flight SQL connection...")
+		if _, err := c.sqlClient.Execute(ctx, "SELECT 1"); err != nil {
+			c.logger.Warnf("Flight SQL connection test failed: %v", err)
+			// 尝试其他简单查询
+			if _, err2 := c.sqlClient.Execute(ctx, "SHOW TABLES LIMIT 1"); err2 != nil {
+				c.logger.Errorf("Flight SQL connection test completely failed: %v", err2)
+				return err2
+			} else {
+				c.logger.Info("Flight SQL connection recovered with alternative query")
+			}
+		} else {
+			c.logger.Debug("Flight SQL connection test successful")
 		}
-		c.logger.Info("Flight SQL connection recovered with alternative query")
+	} else {
+		c.logger.Debug("Flight SQL not configured, skipping Flight SQL connection test")
 	}
 
 	return nil
@@ -937,14 +1184,26 @@ func (c *Client) buildCreateTableSQL(tableName string, schema *arrow.Schema) (st
 		columns = append(columns, columnDef)
 	}
 
-	// 构建基本的CREATE TABLE语句
+	// 确保至少有一个列定义
+	if len(columns) == 0 {
+		return "", fmt.Errorf("no valid columns generated from schema")
+	}
+
+	// 构建CREATE TABLE语句 - StarRocks语法
 	var sqlBuilder strings.Builder
 	sqlBuilder.WriteString(fmt.Sprintf("CREATE TABLE IF NOT EXISTS `%s` (\n", tableName))
-	sqlBuilder.WriteString("  " + strings.Join(columns, ",\n  "))
 
-	// 添加主键（如果有）
+	// 写入列定义
+	sqlBuilder.WriteString("  " + strings.Join(columns, ",\n  "))
+	sqlBuilder.WriteString("\n)")
+
+	// StarRocks表引擎和键模型
+	sqlBuilder.WriteString("\nENGINE=OLAP")
+
+	// 选择键模型
 	if len(primaryKeyColumns) > 0 {
-		sqlBuilder.WriteString(",\n  PRIMARY KEY (")
+		// 使用PRIMARY KEY模型（StarRocks 3.0+）
+		sqlBuilder.WriteString("\nPRIMARY KEY (")
 		for i, col := range primaryKeyColumns {
 			if i > 0 {
 				sqlBuilder.WriteString(", ")
@@ -952,22 +1211,14 @@ func (c *Client) buildCreateTableSQL(tableName string, schema *arrow.Schema) (st
 			sqlBuilder.WriteString(fmt.Sprintf("`%s`", col))
 		}
 		sqlBuilder.WriteString(")")
-	}
 
-	sqlBuilder.WriteString("\n)")
-
-	// 添加StarRocks特定的表选项
-	sqlBuilder.WriteString("\nENGINE=OLAP")
-
-	// 如果没有主键，使用DUPLICATE KEY
-	if len(primaryKeyColumns) == 0 {
-		// 使用第一个字段作为分布键
+		// 使用主键作为分布键
+		sqlBuilder.WriteString(fmt.Sprintf("\nDISTRIBUTED BY HASH(`%s`) BUCKETS 10", primaryKeyColumns[0]))
+	} else {
+		// 使用DUPLICATE KEY模型
 		firstField := schema.Field(0)
 		sqlBuilder.WriteString(fmt.Sprintf("\nDUPLICATE KEY(`%s`)", firstField.Name))
 		sqlBuilder.WriteString(fmt.Sprintf("\nDISTRIBUTED BY HASH(`%s`) BUCKETS 10", firstField.Name))
-	} else {
-		// 使用主键作为分布键
-		sqlBuilder.WriteString(fmt.Sprintf("\nDISTRIBUTED BY HASH(`%s`) BUCKETS 10", primaryKeyColumns[0]))
 	}
 
 	// 添加默认属性
@@ -977,7 +1228,12 @@ func (c *Client) buildCreateTableSQL(tableName string, schema *arrow.Schema) (st
 	sqlBuilder.WriteString("  \"compression\" = \"LZ4\"\n")
 	sqlBuilder.WriteString(")")
 
-	return sqlBuilder.String(), nil
+	finalSQL := sqlBuilder.String()
+
+	// 调试输出生成的SQL
+	c.logger.Debugf("Generated CREATE TABLE SQL:\n%s", finalSQL)
+
+	return finalSQL, nil
 }
 
 // convertArrowTypeToStarRocks 将Arrow数据类型转换为StarRocks数据类型
@@ -1042,6 +1298,194 @@ type StreamLoadResult struct {
 	Status           string
 }
 
+// NewArrowStreamWriter 创建零拷贝Arrow流式写入器
+func (c *Client) NewArrowStreamWriter(tableName string) (*ArrowStreamWriter, error) {
+	return &ArrowStreamWriter{
+		client:        c,
+		tableName:     tableName,
+		totalRecords:  0,
+		totalRows:     0,
+		totalBytes:    0,
+		isInitialized: false,
+	}, nil
+}
+
+// NewArrowStreamWriterWithAutoCreate 创建零拷贝Arrow流式写入器，支持自动建表
+func (c *Client) NewArrowStreamWriterWithAutoCreate(tableName string, sourceSchema *arrow.Schema) (*ArrowStreamWriter, error) {
+	writer := &ArrowStreamWriter{
+		client:        c,
+		tableName:     tableName,
+		totalRecords:  0,
+		totalRows:     0,
+		totalBytes:    0,
+		isInitialized: false,
+	}
+
+	// 如果提供了源schema，检查目标表是否存在，不存在则自动创建
+	if sourceSchema != nil {
+		_, err := c.GetTableInfo(context.Background(), tableName)
+		if err != nil && strings.Contains(err.Error(), "not found") {
+			c.logger.Infof("Table %s not found, attempting to create it automatically", tableName)
+
+			if createErr := c.createTableFromSchema(tableName, sourceSchema); createErr != nil {
+				return nil, fmt.Errorf("failed to auto-create table %s: %w (original error: %v)", tableName, createErr, err)
+			}
+
+			c.logger.Infof("Successfully auto-created table %s", tableName)
+		} else if err != nil {
+			return nil, fmt.Errorf("failed to get table info: %w", err)
+		}
+	}
+
+	return writer, nil
+}
+
+// initializeStream 初始化Arrow Flight SQL流连接
+func (sw *ArrowStreamWriter) initializeStream(ctx context.Context, schema *arrow.Schema) error {
+	if sw.isInitialized {
+		return nil
+	}
+
+	// 创建插入语句的Flight Descriptor
+	insertSQL := fmt.Sprintf("INSERT INTO %s", sw.tableName)
+	cmdDesc := &flight.FlightDescriptor{
+		Type: 0, // Use default type
+		Cmd:  []byte(insertSQL),
+	}
+
+	// 创建DoPut流
+	flightStream, err := sw.client.flightClient.DoPut(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to create DoPut stream: %w", err)
+	}
+
+	sw.flightStream = flightStream
+	sw.targetSchema = schema
+	sw.isInitialized = true
+
+	// 发送schema信息（可选，某些实现需要）
+	schemaMsg := &flight.FlightData{
+		FlightDescriptor: cmdDesc,
+		DataHeader:       nil, // Schema will be inferred from first record
+	}
+
+	if err := sw.flightStream.Send(schemaMsg); err != nil {
+		sw.flightStream.CloseSend()
+		return fmt.Errorf("failed to send schema message: %w", err)
+	}
+
+	sw.client.logger.Debugf("Initialized Arrow stream writer for table %s", sw.tableName)
+	return nil
+}
+
+// WriteArrowRecord 写入Arrow Record - 核心零拷贝方法
+func (sw *ArrowStreamWriter) WriteArrowRecord(ctx context.Context, record arrow.Record) error {
+	// 初始化流（如果尚未初始化）
+	if !sw.isInitialized {
+		if err := sw.initializeStream(ctx, record.Schema()); err != nil {
+			return fmt.Errorf("failed to initialize stream: %w", err)
+		}
+	}
+
+	// 检查上下文是否已取消
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	default:
+	}
+
+	// 直接序列化Arrow Record到字节流 - 零拷贝操作
+	buf := new(bytes.Buffer)
+	writer := ipc.NewWriter(buf, ipc.WithSchema(record.Schema()))
+	if err := writer.Write(record); err != nil {
+		return fmt.Errorf("failed to serialize record: %w", err)
+	}
+	writer.Close()
+
+	// 创建Flight数据消息
+	msg := &flight.FlightData{
+		FlightDescriptor: nil, // 后续消息不需要descriptor
+		DataBody:         buf.Bytes(),
+	}
+
+	// 发送数据到StarRocks
+	if err := sw.flightStream.Send(msg); err != nil {
+		return fmt.Errorf("failed to send record: %w", err)
+	}
+
+	// 更新统计信息
+	sw.totalRecords++
+	sw.totalRows += record.NumRows()
+	sw.totalBytes += int64(len(msg.DataBody))
+
+	sw.client.logger.Debugf("Streamed record %d with %d rows (%d bytes) to table %s",
+		sw.totalRecords, record.NumRows(), len(msg.DataBody), sw.tableName)
+
+	return nil
+}
+
+// Finalize 完成流式写入并获取结果
+func (sw *ArrowStreamWriter) Finalize(ctx context.Context) (*ArrowWriteResult, error) {
+	if !sw.isInitialized {
+		return &ArrowWriteResult{
+			RowsWritten:  0,
+			BytesWritten: 0,
+			Duration:     0,
+			Success:      true,
+		}, nil
+	}
+
+	startTime := time.Now()
+
+	// 关闭发送流
+	if err := sw.flightStream.CloseSend(); err != nil {
+		sw.client.logger.Warnf("Failed to close send stream: %v", err)
+	}
+
+	// 接收服务器响应
+	result, err := sw.flightStream.Recv()
+	duration := time.Since(startTime)
+
+	if err != nil {
+		return &ArrowWriteResult{
+			RowsWritten:  sw.totalRows,
+			BytesWritten: sw.totalBytes,
+			Duration:     duration,
+			ErrorMessage: fmt.Sprintf("failed to receive put result: %v", err),
+			Success:      false,
+		}, fmt.Errorf("failed to finalize stream: %w", err)
+	}
+
+	sw.client.logger.Infof("Successfully completed Arrow stream write to table %s: %d records, %d rows, %d bytes in %v",
+		sw.tableName, sw.totalRecords, sw.totalRows, sw.totalBytes, duration)
+
+	// 解析结果（如果需要）
+	_ = result // StarRocks可能返回额外的统计信息
+
+	return &ArrowWriteResult{
+		RowsWritten:  sw.totalRows,
+		BytesWritten: sw.totalBytes,
+		Duration:     duration,
+		Success:      true,
+	}, nil
+}
+
+// Close 关闭流式写入器
+func (sw *ArrowStreamWriter) Close() error {
+	if sw.isInitialized && sw.flightStream != nil {
+		if err := sw.flightStream.CloseSend(); err != nil {
+			sw.client.logger.Warnf("Failed to close stream: %v", err)
+			return err
+		}
+	}
+	return nil
+}
+
+// GetStatistics 获取当前统计信息
+func (sw *ArrowStreamWriter) GetStatistics() (records int64, rows int64, bytes int64) {
+	return sw.totalRecords, sw.totalRows, sw.totalBytes
+}
+
 // StreamLoadFromCSV 使用Stream Load从CSV数据导入（保持向后兼容）
 func (c *Client) StreamLoadFromCSV(ctx context.Context, tableName string, csvData [][]string, options map[string]string) (*StreamLoadResult, error) {
 	// 转换为简单的结果对象，实际上通过Arrow Flight SQL处理
@@ -1050,4 +1494,39 @@ func (c *Client) StreamLoadFromCSV(ctx context.Context, tableName string, csvDat
 		Status:           "success",
 	}
 	return result, nil
+}
+
+// ExecuteQuery 执行Flight SQL查询并返回FlightInfo
+func (c *Client) ExecuteQuery(ctx context.Context, query string) (*flight.FlightInfo, error) {
+	if c.sqlClient == nil {
+		return nil, fmt.Errorf("Flight SQL client not initialized - this operation requires Flight SQL configuration")
+	}
+
+	c.logger.Debugf("Executing Flight SQL query: %s", query)
+
+	// 使用Flight SQL客户端执行查询
+	flightInfo, err := c.sqlClient.Execute(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute Flight SQL query: %w", err)
+	}
+
+	c.logger.Debugf("Flight SQL query executed, got %d endpoints", len(flightInfo.Endpoint))
+	return flightInfo, nil
+}
+
+// DoGet 从指定的ticket获取Arrow数据流
+func (c *Client) DoGet(ctx context.Context, ticket *flight.Ticket) (flight.FlightService_DoGetClient, error) {
+	if c.flightClient == nil {
+		return nil, fmt.Errorf("Flight client not initialized - this operation requires Flight SQL configuration")
+	}
+
+	c.logger.Debugf("Getting data from Flight ticket")
+
+	// 使用Flight客户端获取数据流
+	stream, err := c.flightClient.DoGet(ctx, ticket)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get data from ticket: %w", err)
+	}
+
+	return stream, nil
 }

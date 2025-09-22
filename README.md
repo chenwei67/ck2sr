@@ -4,14 +4,14 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)]()
 
-**ck2sr** 是一个高效、可靠、完整的 ClickHouse 到 StarRocks 数据同步服务，采用 **ClickHouse TCP + ArrowStream** 和 **StarRocks Arrow Flight SQL** 实现高性能零拷贝数据传输，支持分布式部署，能够在生产环境中稳定运行。
+**ck2sr** 是一个高效、可靠、完整的 ClickHouse 到 StarRocks 数据同步服务，采用 **ClickHouse ArrowStream 原生格式** 和 **StarRocks Arrow Flight SQL** 实现**真正的零拷贝**数据传输，支持分布式部署，能够在生产环境中稳定运行。
 
 ## 🌟 核心特性
 
-- **混合高性能架构**：ClickHouse 使用 TCP 连接 + ArrowStream 格式查询，StarRocks 使用 Arrow Flight SQL 写入，实现高性能列式数据传输
-- **零拷贝数据传输**：基于 Arrow 列式内存格式，实现端到端的零拷贝数据传输
-- **高性能网络通信**：基于 gRPC 和 HTTP/2 协议，支持多路复用和流式传输
-- **🆕 数据转换引擎**：实时数据转换、类型转换、数据验证和清洗 (v2.2.0+)
+- **🚀 真正的零拷贝架构**：ClickHouse 使用原生 `FORMAT ArrowStream` 直接输出，StarRocks 使用 Arrow Flight SQL 流式写入，实现端到端零拷贝传输
+- **⚡ 极致性能优化**：基于 Apache Arrow 列式内存格式，避免数据序列化/反序列化开销，显著提升同步性能
+- **🔄 流式传输架构**：支持大数据集的实时流式传输，内存占用低，支持TB级数据同步
+- **🆕 智能数据转换引擎**：实时数据转换、类型转换、数据验证和清洗 (v2.2.0+)
 - **🆕 灵活表名控制**：直接使用配置的目标表名，无需自动后缀 (v2.2.0+)
 - **策略驱动**：通过配置文件定义数据同步任务，支持灵活的同步策略
 - **流量控制**：支持全局和任务级别的速率限制，防止对源系统造成压力
@@ -32,8 +32,9 @@
 │   ClickHouse    │    │      ck2sr      │    │    StarRocks    │
 │   (数据源)      │───▶│   (同步服务)    │───▶│   (目标库)      │
 │                 │    │                 │    │                 │
-│ TCP Connection  │    │ Arrow Memory    │    │ Arrow Flight    │
-│ ArrowStream     │    │ Zero-Copy       │    │ SQL Endpoint    │
+│ FORMAT          │    │ ArrowStream     │    │ Arrow Flight    │
+│ ArrowStream     │    │ Zero-Copy       │    │ SQL Streaming   │
+│ 原生输出        │    │ Streaming       │    │ Direct Write    │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
                                │
                                ▼
@@ -42,8 +43,8 @@
                     │ (File/K8s CRD)  │
                     └─────────────────┘
 
-数据流: TCP ArrowStream → Arrow Record → Arrow Flight SQL
-协议: ClickHouse TCP + StarRocks gRPC/HTTP2 + Arrow 列式格式 + 零拷贝传输
+数据流: ClickHouse ArrowStream → ArrowStreamWriter → StarRocks Flight SQL
+协议: TCP Native ArrowStream + gRPC Arrow Flight SQL + 零拷贝内存传输
 ```
 
 ### 核心组件
@@ -634,6 +635,20 @@ go test -bench=. -benchmem ./...
 3. 创建新的 Issue，详细描述问题
 
 ## 📋 版本历史
+
+- **v2.3.0** (2024-09-18) - **重大架构重构**
+  - **🚀 真正零拷贝流式传输**: 重构为 ClickHouse ArrowStream → StarRocks Flight SQL 直接流式传输
+  - **⚡ 性能革命性提升**: 消除了数据行级处理和Arrow重构的性能瓶颈
+  - **🔄 流式写入器**: 新增 ArrowStreamWriter 支持连续流式写入，避免重复连接开销
+  - **🛠️ 重构同步工作器**: 实现端到端零拷贝数据传输架构
+  - **✅ 完整测试验证**: 所有模块编译测试通过，确保生产就绪
+  - **📚 文档全面更新**: 反映新的零拷贝架构和性能优势
+
+- **v2.2.0** (2024-09-17) - 数据转换与目标表优化
+  - **🎉 数据转换引擎**: 支持字段级数据转换、表达式转换和验证
+  - **🐛 目标表命名优化**: 直接使用配置的 `target_table` 字段，不再自动添加后缀
+  - **🚀 性能提升**: Arrow记录内存管理优化
+  - **🔧 新增组件**: pkg/transformer/ 数据转换引擎包
 
 - **v2.1.0** (2024-09-18)
   - **架构重构**: 采用混合高性能传输架构

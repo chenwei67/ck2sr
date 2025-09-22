@@ -10,7 +10,11 @@
       "Bash(go test:*)",
       "Bash(git add:*)",
       "Bash(timeout 10 go run:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(.srtool.exe:*)",
+      "Bash(./srtool:*)",
+      "Bash(chmod:*)",
+      "Bash(go doc:*)"
     ],
     "deny": [],
     "ask": []
