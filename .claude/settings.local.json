@@ -14,7 +14,13 @@
       "Bash(.srtool.exe:*)",
       "Bash(./srtool:*)",
       "Bash(chmod:*)",
-      "Bash(go doc:*)"
+      "Bash(go doc:*)",
+      "Bash(find:*)",
+      "Bash(go list:*)",
+      "Read(//c/Users/User/go/pkg/mod/github.com/apache/arrow-adbc/go/adbc@v1.8.0/**)",
+      "Bash(./arrowtool.exe --help)",
+      "Bash(./arrowtool.exe:*)",
+      "Bash(.arrowtool.exe:*)"
     ],
     "deny": [],
     "ask": []
