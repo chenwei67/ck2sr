@@ -20,7 +20,11 @@
       "Read(//c/Users/User/go/pkg/mod/github.com/apache/arrow-adbc/go/adbc@v1.8.0/**)",
       "Bash(./arrowtool.exe --help)",
       "Bash(./arrowtool.exe:*)",
-      "Bash(.arrowtool.exe:*)"
+      "Bash(.arrowtool.exe:*)",
+      "Bash(tree:*)",
+      "Bash(timeout:*)",
+      "Bash(./dtool help)",
+      "Bash(./dtool:*)"
     ],
     "deny": [],
     "ask": []

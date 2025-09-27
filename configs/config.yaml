@@ -1,260 +1,121 @@
-# ck2sr 配置文件示例
-# ClickHouse 到 StarRocks 数据同步服务配置
-
+# ck2sr 配置文件 v2.0
 # ClickHouse 数据库配置
 clickhouse:
-  host: "localhost"
-  port: 9000
-  username: "default"           # TCP 连接用户名
-  password: ""                  # TCP 连接密码
-  database: "default"
-
-  # ArrowStream 配置
-  batch_size: 10000
-  compression_type: "lz4"       # lz4, gzip, none
-
-  # TCP 连接配置
-  max_block_size: 100000
-  read_timeout: "30s"
-  write_timeout: "30s"
-  max_idle_conns: 10
-  max_open_conns: 100
-  conn_max_lifetime: "1h"
+  - name: myck-1
+    mysql: # MySQL协议接入配置（用于数据导出）
+      host: "localhost"
+      port: 9004
+      username: "default"
+      password: ""
+      timeout: "30s"
+    http: # HTTP协议接入配置（用于Stream Load数据导入）
+      host: "localhost"
+      port: 8123
+      username: "default"
+      password: ""
+      timeout: "30s"
 
 # StarRocks 数据库配置
 starrocks:
-  host: "localhost"
-  port: 9030
-  username: "root"              # MySQL 连接用户名
-  password: ""                  # MySQL 连接密码
-  database: "test"
-
-  # Flight SQL 配置
-  flight_sql_endpoint: "localhost"
-  flight_sql_port: 9090
-  flight_sql_auth:              # Flight SQL 独立认证配置
-    username: "flight_admin"    # Flight SQL 用户名（可与MySQL连接不同）
-    password: "flight_secret"   # Flight SQL 密码（可与MySQL连接不同）
-  use_tls: false
-  tls_cert_file: ""
-  tls_key_file: ""
-  tls_ca_file: ""
-
-  # Arrow Flight 配置
-  flight_timeout: "30s"
-  batch_size: 10000
-  compression_type: "lz4"  # none, gzip, lz4, zstd
-  max_message_size: 100    # gRPC 最大消息大小 (MB), 用于防止 "frame too large" 错误
-
-  # 连接池配置
-  max_idle_conns: 10
-  max_open_conns: 100
-  conn_max_lifetime: "1h"
-
-# 全局流量控制配置
-global_rate_limit:
-  max_bytes_per_second: 104857600  # 100MB/s
-  max_rows_per_second: 100000
-  burst_size: 1000
-
-# 全局并发控制配置
-global_concurrency:
-  max_workers: 10
-  max_concurrent_tasks: 5
-  batch_size: 10000
-
-# 全局重试配置
-global_retry:
-  max_retries: 3
-  initial_delay: "1s"
-  max_delay: "30s"
-  backoff_factor: 2.0
+  - name: mysr-1
+    mysql: # MySQL协议接入配置（用于数据导出，备用方案）
+      host: "localhost"
+      port: 9030
+      username: "root"
+      password: ""
+      timeout: "30s"
+    flightsql: # Arrow Flight SQL协议接入配置（用于数据导出）
+      host: "localhost"
+      port: 9408
+      username: "root"
+      password: ""
+      timeout: "30s"
+      tls:
+        enabled: false
+        cert_file: ""
+        key_file: ""
+        ca_file: ""
+        skip_verify: false
+    http: # HTTP协议接入配置（用于Stream Load数据导入）
+      host: "localhost"
+      port: 8030
+      username: "root"
+      password: ""
+      timeout: "30s"
 
 # 同步任务配置
 sync_tasks:
-  - task_id: "user_data_sync"
-    name: "用户数据同步"
-    description: "同步用户表数据从 ClickHouse 到 StarRocks"
+  - task_id: "ck2sr_demo_001"
+    name: "ClickHouse到StarRocks演示同步"
     enabled: true
-    source_table: "users"
-    target_table: "users_sync"
-
-    # 数据范围配置
-    data_range:
-      time_column: "created_at"
-      start_time: "2023-01-01 00:00:00"
-      # end_time: "2023-12-31 23:59:59"  # 可选，不设置表示同步到当前时间
-      where: "status = 'active'"
-
-    # 时间窗口限制（仅在指定时间段内运行）
-    time_window:
-      start_time: "01:00"
-      end_time: "05:00"
-
-    # 流量控制（任务级别，会覆盖全局配置）
-    rate_limit:
-      max_bytes_per_second: 52428800  # 50MB/s
-      max_rows_per_second: 50000
-      burst_size: 500
-
-    # 并发控制
-    concurrency:
-      max_workers: 5
-      batch_size: 5000
-
-    # 重试配置
-    retry:
-      max_retries: 5
-      initial_delay: "2s"
-      max_delay: "60s"
-      backoff_factor: 2.0
-
-    # 数据完整性验证
-    validate:
-      enabled: true
-      check_row_count: true
-      check_checksum: true
-      check_columns: ["id", "username", "email"]
-      tolerance_percent: 1.0
-
-    # 列映射（源列名 -> 目标列名）
-    column_mapping:
-      user_id: "id"
-      user_name: "username"
-      email_address: "email"
-      create_time: "created_at"
-
-    # 数据转换配置 (NEW v2.2.0+)
-    data_transform:
-      enabled: true
-      # 字段级转换配置
-      field_transforms:
-        - column: "username"
-          type_conversion:
-            source_type: "string"
-            target_type: "varchar"
-            expression: "trim"        # 去除首尾空格
-          required: true
-          validation:
-            pattern: "^[a-zA-Z0-9_]+$"  # 只允许字母数字下划线
-            allow_null: false
-        - column: "age"
-          type_conversion:
-            source_type: "int64"
-            target_type: "int32"
-          validation:
-            min_value: 0
-            max_value: 150
-          default_value: 0
-        - column: "email"
-          type_conversion:
-            source_type: "string"
-            target_type: "varchar"
-            expression: "lower"       # 转为小写
-          validation:
-            pattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$"
-            allow_null: false
-          required: true
-        - column: "status"
-          type_conversion:
-            source_type: "string"
-            target_type: "varchar"
-            expression: "upper"       # 转为大写
-          default_value: "ACTIVE"
-          validation:
-            pattern: "^(ACTIVE|INACTIVE|PENDING)$"
-      # 全局类型转换规则
-      global_rules:
-        - source_type: "float64"
-          target_type: "double"
-        - source_type: "int64"
-          target_type: "bigint"
-        - source_type: "timestamp"
-          target_type: "datetime"
-
-    # 任务优先级
     priority: 1
-
-    # Cron 表达式（可选，用于定时任务）
-    cron_expression: "0 2 * * *"  # 每天凌晨 2 点执行
-
-  - task_id: "order_data_sync"
-    name: "订单数据同步"
-    description: "同步订单表数据"
-    enabled: true
-    source_table: "orders"
-    target_table: "orders_sync"       # 直接使用此表名，不再自动添加_ck2sr后缀
-
-    data_range:
-      time_column: "order_date"
-      where: "status IN ('completed', 'paid')"
-
-    # 仅在工作日运行
-    time_window:
-      start_time: "02:00"
-      end_time: "06:00"
-
-    # 数据转换配置 - 订单数据专用转换
-    data_transform:
-      enabled: true
-      field_transforms:
-        - column: "order_amount"
-          type_conversion:
-            source_type: "float64"
-            target_type: "decimal(15,2)"
-          validation:
-            min_value: 0.01
-            max_value: 999999.99
-          default_value: 0.00
-        - column: "order_status"
-          type_conversion:
-            source_type: "string"
-            target_type: "varchar"
-            expression: "upper"
-          validation:
-            pattern: "^(COMPLETED|PAID|SHIPPED|CANCELLED)$"
-          default_value: "PENDING"
-      global_rules:
-        - source_type: "datetime"
-          target_type: "timestamp"
-
-    validate:
-      enabled: true
-      check_row_count: true
-      check_checksum: false
-      tolerance_percent: 0.5
-
-    priority: 2
-    cron_expression: "0 3 * * 1-5"  # 工作日凌晨 3 点执行
+    reader:
+      name: "myck-1"          # 引用ClickHouse实例
+      vendor: "clickhouse"    # 新增：厂商标识
+      protocol: "mysql"       # 使用MySQL协议导出
+      database: "test"
+      tables:                 # 支持多张表同步
+        - "orders"
+        - "users"
+    writer:
+      name: "mysr-1"          # 引用StarRocks实例
+      vendor: "starrocks"     # 新增：厂商标识
+      protocol: "http"        # 使用HTTP Stream Load导入
+      database: "test"
+      tables:                 # 目标表列表，与源表一一对应
+        - "orders_sync"
+        - "users_sync"
+    settings:
+      data_range:
+        time_column: "created_at"
+        start_time: "2024-01-01 00:00:00"
+        end_time: ""          # 空表示同步到最新数据
+      time_window:
+        start_time: ""      # 清空时间窗口限制
+        end_time: ""
+      rate_limit:
+        max_bytes_per_second: 52428800    # 50MB/s 总限制
+        max_rows_per_second: 50000        # 总行数限制
+        burst_size: 1000
+      retry:
+        max_retries: 3
+        initial_delay: "2s"
+        max_delay: "60s"
+        backoff_factor: 2.0
+      column_mapping:          # 全局列映射
+        user_id: "id"
+        create_time: "created_at"
+      batch_size: 10000        # 批处理大小
+      csv_format:              # CSV导入格式配置
+        delimiter: ","
+        quote_char: "\""
+        escape_char: "\\"
+        null_value: "\\N"
+        header: false
+      parallel_tables: 2       # 并行处理表的数量
 
 # 监控配置
 monitor:
-  enabled: true
+  enabled: false  # 暂时禁用，因为监控模块还未实现
   metrics_port: 8080
   metrics_path: "/metrics"
   update_interval: "10s"
   health_check_port: 8081
 
-# Kubernetes 配置
-kubernetes:
-  enabled: false
-  namespace: "default"
-  configmap_name: "ck2sr-config"
-  crd_name: "ck2sr-tasks"
-  label_selector: "app=ck2sr"
-  pod_name: ""
-
 # 日志配置
 log:
-  level: "info"          # debug, info, warn, error
-  format: "json"         # json, text
-  output: "stdout"       # stdout, file
+  level: "info"                # debug, info, warn, error
+  format: "text"               # json, text
+  output: "stdout"             # stdout, file
   file_path: "/var/log/ck2sr/ck2sr.log"
-  max_size: 100          # MB
+  max_size: 100               # MB
   max_backups: 10
-  max_age: 30            # days
+  max_age: 30                 # days
+  compress: true
 
-# 其他配置
-storage_path: "./data"
-heartbeat_interval: "30s"
-graceful_shutdown_timeout: "30s"
+# 服务运行配置
+service:
+  storage_path: "./data"
+  heartbeat_interval: "30s"
+  graceful_shutdown_timeout: "30s"
+  max_concurrent_tasks: 5
