@@ -49,8 +49,5 @@ func (dc *DataConverter) BuildSelectQuery(database, table string) string {
 		query += fmt.Sprintf(" LIMIT %d", dc.config.Settings.BatchSize)
 	}
 
-	// 添加JSON格式输出（针对ClickHouse）
-	// query += " FORMAT JSON"
-
 	return query
 }

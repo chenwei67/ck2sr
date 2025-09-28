@@ -15,9 +15,20 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/sirupsen/logrus"
 
-	"github.com/ck2sr/ck2sr/internal/logging"
 	"github.com/ck2sr/ck2sr/internal/config"
+	"github.com/ck2sr/ck2sr/internal/logging"
 )
+
+// ColumnInfo 表示数据库列信息
+type ColumnInfo struct {
+	Name         string
+	DataType     string
+	IsNullable   bool
+	DefaultValue *string
+	CharLength   *int64
+	NumPrecision *int64
+	NumScale     *int64
+}
 
 type GenerateDataOptions struct {
 	DatabaseType string
@@ -112,8 +123,8 @@ func parseGenerateDataFlags(dbType string, args []string) (*GenerateDataOptions,
 
 	options := &GenerateDataOptions{
 		DatabaseType: dbType,
-		Rows:         10000, // Default 10k rows
-		BatchSize:    1000,  // Default 1k batch
+		Rows:         10000,  // Default 10k rows
+		BatchSize:    1000,   // Default 1k batch
 		LogLevel:     "info", // Default log level
 	}
 
@@ -153,6 +164,7 @@ type DataGenerator struct {
 	options *GenerateDataOptions
 	ctx     context.Context
 	db      *sql.DB
+	schema  []ColumnInfo // 表的schema信息
 }
 
 func (g *DataGenerator) Generate() error {
@@ -183,6 +195,11 @@ func (g *DataGenerator) Generate() error {
 	// Create table if not exists
 	if err := g.createTableIfNotExists(); err != nil {
 		return fmt.Errorf("failed to create table: %w", err)
+	}
+
+	// Read table schema
+	if err := g.readTableSchema(); err != nil {
+		return fmt.Errorf("failed to read table schema: %w", err)
 	}
 
 	// Generate and insert data
@@ -306,6 +323,95 @@ func (g *DataGenerator) getClickHouseCreateTableSQL() string {
 	ORDER BY id`, g.options.Table)
 }
 
+// readTableSchema 读取表的schema信息
+func (g *DataGenerator) readTableSchema() error {
+	var query string
+	var rows *sql.Rows
+	var err error
+
+	switch g.options.DatabaseType {
+	case "starrocks":
+		query = `SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE
+				 FROM INFORMATION_SCHEMA.COLUMNS
+				 WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+				 ORDER BY ORDINAL_POSITION`
+		g.logger.Infof("Reading table schema for %s.%s", g.options.Database, g.options.Table)
+		rows, err = g.db.QueryContext(g.ctx, query, g.options.Database, g.options.Table)
+	case "clickhouse":
+		// ClickHouse system表不支持参数化查询，需要直接拼接
+		// 过滤掉ALIAS类型的列，因为它们是虚拟列，不能插入数据
+		query = fmt.Sprintf(`SELECT name, type,
+				        CASE WHEN type LIKE '%%Nullable%%' THEN 'YES' ELSE 'NO' END as is_nullable,
+				        default_expression,
+				        NULL as character_maximum_length,
+				        NULL as numeric_precision,
+				        NULL as numeric_scale
+				 FROM system.columns
+				 WHERE database = '%s' AND table = '%s' AND default_kind != 'ALIAS'
+				 ORDER BY position`, g.options.Database, g.options.Table)
+		g.logger.Infof("Reading table schema for %s.%s", g.options.Database, g.options.Table)
+		g.logger.Debugf("ClickHouse schema query: %s", query)
+		rows, err = g.db.QueryContext(g.ctx, query)
+	default:
+		return fmt.Errorf("unsupported database type: %s", g.options.DatabaseType)
+	}
+
+	if err != nil {
+		return fmt.Errorf("failed to query table schema: %w", err)
+	}
+	defer rows.Close()
+
+	var schema []ColumnInfo
+	for rows.Next() {
+		var col ColumnInfo
+		var nullable string
+		var defaultVal sql.NullString
+		var charLength sql.NullInt64
+		var numPrecision sql.NullInt64
+		var numScale sql.NullInt64
+
+		err := rows.Scan(&col.Name, &col.DataType, &nullable, &defaultVal,
+			&charLength, &numPrecision, &numScale)
+		if err != nil {
+			return fmt.Errorf("failed to scan column info: %w", err)
+		}
+
+		col.IsNullable = nullable == "YES"
+		if defaultVal.Valid {
+			col.DefaultValue = &defaultVal.String
+		}
+		if charLength.Valid {
+			col.CharLength = &charLength.Int64
+		}
+		if numPrecision.Valid {
+			col.NumPrecision = &numPrecision.Int64
+		}
+		if numScale.Valid {
+			col.NumScale = &numScale.Int64
+		}
+
+		schema = append(schema, col)
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("error reading table schema: %w", err)
+	}
+
+	if len(schema) == 0 {
+		return fmt.Errorf("table %s.%s not found or has no columns", g.options.Database, g.options.Table)
+	}
+
+	g.schema = schema
+	g.logger.Infof("Successfully read schema for table %s with %d columns", g.options.Table, len(g.schema))
+
+	// 输出schema信息用于调试
+	for i, col := range g.schema {
+		g.logger.Debugf("Column %d: %s %s (nullable: %v)", i+1, col.Name, col.DataType, col.IsNullable)
+	}
+
+	return nil
+}
+
 func (g *DataGenerator) generateAndInsertData() error {
 	startTime := time.Now()
 	totalBatches := (g.options.Rows + g.options.BatchSize - 1) / g.options.BatchSize
@@ -362,46 +468,341 @@ func (g *DataGenerator) generateAndInsertData() error {
 func (g *DataGenerator) insertBatch(batchNum, batchSize int) error {
 	baseID := int64(batchNum * g.options.BatchSize)
 
+	// 生成基于schema的批次数据
+	batchData, err := g.generateBatchData(baseID, batchSize)
+	if err != nil {
+		return fmt.Errorf("failed to generate batch data: %w", err)
+	}
+
 	// 根据数据库类型使用不同的插入策略
 	switch g.options.DatabaseType {
 	case "clickhouse":
-		return g.insertClickHouseBatch(baseID, batchSize)
+		return g.insertClickHouseBatch(batchData)
 	case "starrocks":
-		return g.insertStarRocksBatch(baseID, batchSize)
+		return g.insertStarRocksBatch(batchData)
 	default:
 		return fmt.Errorf("unsupported database type: %s", g.options.DatabaseType)
 	}
 }
 
+// generateBatchData 基于schema生成批次数据
+func (g *DataGenerator) generateBatchData(baseID int64, batchSize int) ([][]interface{}, error) {
+	if len(g.schema) == 0 {
+		return nil, fmt.Errorf("table schema not loaded")
+	}
+
+	var batchData [][]interface{}
+
+	for i := 0; i < batchSize; i++ {
+		rowID := baseID + int64(i)
+		rowData, err := g.generateRowDataBySchema(rowID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate row data for ID %d: %w", rowID, err)
+		}
+		batchData = append(batchData, rowData)
+	}
+
+	return batchData, nil
+}
+
+// generateRowDataBySchema 根据schema生成单行数据
+func (g *DataGenerator) generateRowDataBySchema(id int64) ([]interface{}, error) {
+	r := rand.New(rand.NewSource(time.Now().UnixNano() + id))
+	var rowData []interface{}
+
+	for _, col := range g.schema {
+		value, err := g.generateValueForColumn(col, id, r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate value for column %s: %w", col.Name, err)
+		}
+		rowData = append(rowData, value)
+	}
+
+	return rowData, nil
+}
+
+// generateValueForColumn 根据列定义生成值
+func (g *DataGenerator) generateValueForColumn(col ColumnInfo, id int64, r *rand.Rand) (interface{}, error) {
+	// 处理可空字段，10%概率为null
+	if col.IsNullable && r.Float32() < 0.1 {
+		return nil, nil
+	}
+
+	// 根据数据库类型和列类型生成相应的值
+	switch g.options.DatabaseType {
+	case "starrocks":
+		return g.generateStarRocksValue(col, id, r)
+	case "clickhouse":
+		return g.generateClickHouseValue(col, id, r)
+	default:
+		return nil, fmt.Errorf("unsupported database type: %s", g.options.DatabaseType)
+	}
+}
+
+// generateStarRocksValue 为StarRocks生成值
+func (g *DataGenerator) generateStarRocksValue(col ColumnInfo, id int64, r *rand.Rand) (interface{}, error) {
+	dataType := strings.ToUpper(col.DataType)
+
+	switch {
+	case strings.Contains(dataType, "BIGINT"):
+		return id, nil
+	case strings.Contains(dataType, "INT"):
+		return int32(20 + r.Intn(60)), nil
+	case strings.Contains(dataType, "SMALLINT"):
+		return int16(r.Intn(1000)), nil
+	case strings.Contains(dataType, "TINYINT"):
+		if strings.Contains(col.Name, "active") {
+			return r.Intn(2), nil
+		}
+		return r.Intn(256), nil
+	case strings.Contains(dataType, "VARCHAR"), strings.Contains(dataType, "TEXT"):
+		return g.generateStringValue(col, id, r), nil
+	case strings.Contains(dataType, "CHAR"):
+		return g.generateFixedStringValue(col, id, r), nil
+	case strings.Contains(dataType, "DECIMAL"):
+		precision := int64(10)
+		scale := int64(2)
+		if col.NumPrecision != nil {
+			precision = *col.NumPrecision
+		}
+		if col.NumScale != nil {
+			scale = *col.NumScale
+		}
+		return g.generateDecimalValue(precision, scale, r), nil
+	case strings.Contains(dataType, "FLOAT"):
+		return r.Float32() * 100, nil
+	case strings.Contains(dataType, "DOUBLE"):
+		return 50.0 + r.Float64()*100, nil
+	case strings.Contains(dataType, "BOOLEAN"):
+		return r.Intn(2) == 1, nil
+	case strings.Contains(dataType, "DATE"):
+		return g.generateDate(r), nil
+	case strings.Contains(dataType, "DATETIME"), strings.Contains(dataType, "TIMESTAMP"):
+		return g.generateDateTime(r), nil
+	case strings.Contains(dataType, "JSON"):
+		return g.generateJSONValue(col, id, r), nil
+	default:
+		// 默认生成字符串
+		return g.generateStringValue(col, id, r), nil
+	}
+}
+
+// generateClickHouseValue 为ClickHouse生成值
+func (g *DataGenerator) generateClickHouseValue(col ColumnInfo, id int64, r *rand.Rand) (interface{}, error) {
+	dataType := strings.ToUpper(col.DataType)
+
+	switch {
+	case strings.Contains(dataType, "UINT64"):
+		return uint64(id), nil
+	case strings.Contains(dataType, "UINT32"):
+		return uint32(20 + r.Intn(60)), nil
+	case strings.Contains(dataType, "UINT16"):
+		return uint16(r.Intn(65536)), nil
+	case strings.Contains(dataType, "UINT8"):
+		return uint8(r.Intn(256)), nil
+	case strings.Contains(dataType, "INT64"):
+		return int64(id), nil
+	case strings.Contains(dataType, "INT32"):
+		return int32(20 + r.Intn(60)), nil
+	case strings.Contains(dataType, "INT16"):
+		return int16(r.Intn(1000)), nil
+	case strings.Contains(dataType, "INT8"):
+		return int8(r.Intn(256)), nil
+	case strings.Contains(dataType, "STRING"):
+		return g.generateStringValue(col, id, r), nil
+	case strings.Contains(dataType, "FIXEDSTRING"):
+		return g.generateFixedStringValue(col, id, r), nil
+	case strings.Contains(dataType, "DECIMAL"):
+		precision := int64(10)
+		scale := int64(2)
+		if col.NumPrecision != nil {
+			precision = *col.NumPrecision
+		}
+		if col.NumScale != nil {
+			scale = *col.NumScale
+		}
+		return g.generateDecimalValue(precision, scale, r), nil
+	case strings.Contains(dataType, "FLOAT32"):
+		return r.Float32() * 100, nil
+	case strings.Contains(dataType, "FLOAT64"):
+		return r.Float64() * 100, nil
+	case strings.Contains(dataType, "DATE"):
+		return g.generateDate(r), nil
+	case strings.Contains(dataType, "DATETIME"), strings.Contains(dataType, "DATETIME64"):
+		return g.generateDateTime(r), nil
+	default:
+		// 默认生成字符串
+		return g.generateStringValue(col, id, r), nil
+	}
+}
+
+// 辅助方法生成特定类型的值
+func (g *DataGenerator) generateStringValue(col ColumnInfo, id int64, r *rand.Rand) string {
+	switch {
+	case strings.Contains(strings.ToLower(col.Name), "name"):
+		return fmt.Sprintf("user_%d", id)
+	case strings.Contains(strings.ToLower(col.Name), "description"):
+		return fmt.Sprintf("Description for user %d with random content %d", id, r.Intn(1000))
+	case strings.Contains(strings.ToLower(col.Name), "category"):
+		return fmt.Sprintf("CAT%d", r.Intn(10))
+	case strings.Contains(strings.ToLower(col.Name), "metadata"):
+		return fmt.Sprintf(`{"user_id": %d, "level": %d, "tags": ["tag1", "tag2"]}`, id, r.Intn(10))
+	default:
+		length := 20
+		if col.CharLength != nil && *col.CharLength < 100 {
+			length = int(*col.CharLength)
+		}
+		return g.generateRandomString(length, r)
+	}
+}
+
+func (g *DataGenerator) generateFixedStringValue(col ColumnInfo, id int64, r *rand.Rand) string {
+	if strings.Contains(strings.ToLower(col.Name), "category") {
+		value := fmt.Sprintf("CAT%d", r.Intn(10))
+		if col.CharLength != nil {
+			// 填充到固定长度
+			for len(value) < int(*col.CharLength) {
+				value += "\x00"
+			}
+		}
+		return value
+	}
+
+	length := 10
+	if col.CharLength != nil {
+		length = int(*col.CharLength)
+	}
+	return g.generateRandomString(length, r)
+}
+
+func (g *DataGenerator) generateDecimalValue(precision, scale int64, r *rand.Rand) float64 {
+	maxValue := 1.0
+	for i := int64(0); i < precision-scale; i++ {
+		maxValue *= 10
+	}
+	return r.Float64() * maxValue
+}
+
+func (g *DataGenerator) generateDate(r *rand.Rand) time.Time {
+	return time.Date(1980+r.Intn(40), time.Month(1+r.Intn(12)), 1+r.Intn(28), 0, 0, 0, 0, time.UTC)
+}
+
+func (g *DataGenerator) generateDateTime(r *rand.Rand) time.Time {
+	return time.Now()
+	// return time.Now().Add(-time.Duration(r.Intn(365*5)) * 24 * time.Hour)
+}
+
+func (g *DataGenerator) generateJSONValue(col ColumnInfo, id int64, r *rand.Rand) string {
+	return fmt.Sprintf(`{"user_id": %d, "level": %d, "tags": ["tag1", "tag2"]}`, id, r.Intn(10))
+}
+
+func (g *DataGenerator) generateRandomString(length int, r *rand.Rand) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, length)
+	for i := range b {
+		b[i] = charset[r.Intn(len(charset))]
+	}
+	return string(b)
+}
+
+// formatValueForClickHouse 为ClickHouse格式化值
+func (g *DataGenerator) formatValueForClickHouse(value interface{}, col ColumnInfo) (string, error) {
+	if value == nil {
+		return "NULL", nil
+	}
+
+	dataType := strings.ToUpper(col.DataType)
+
+	switch v := value.(type) {
+	case string:
+		// 转义单引号
+		escaped := strings.ReplaceAll(v, "'", "\\'")
+		return fmt.Sprintf("'%s'", escaped), nil
+	case time.Time:
+		if strings.Contains(dataType, "DATE") && !strings.Contains(dataType, "DATETIME") {
+			return fmt.Sprintf("'%s'", v.Format("2006-01-02")), nil
+		}
+		return fmt.Sprintf("'%s'", v.Format("2006-01-02 15:04:05")), nil
+	case bool:
+		if v {
+			return "1", nil
+		}
+		return "0", nil
+	case float32, float64:
+		return fmt.Sprintf("%v", v), nil
+	default:
+		// 数值类型直接返回
+		return fmt.Sprintf("%v", v), nil
+	}
+}
+
+// formatValueForStarRocks 为StarRocks格式化值
+func (g *DataGenerator) formatValueForStarRocks(value interface{}, col ColumnInfo) (string, error) {
+	if value == nil {
+		return "NULL", nil
+	}
+
+	dataType := strings.ToUpper(col.DataType)
+
+	switch v := value.(type) {
+	case string:
+		// 转义单引号
+		escaped := strings.ReplaceAll(v, "'", "\\'")
+		return fmt.Sprintf("'%s'", escaped), nil
+	case time.Time:
+		if strings.Contains(dataType, "DATE") && !strings.Contains(dataType, "DATETIME") {
+			return fmt.Sprintf("'%s'", v.Format("2006-01-02")), nil
+		}
+		return fmt.Sprintf("'%s'", v.Format("2006-01-02 15:04:05")), nil
+	case bool:
+		return fmt.Sprintf("%t", v), nil
+	case float32, float64:
+		return fmt.Sprintf("%v", v), nil
+	default:
+		// 数值类型直接返回
+		return fmt.Sprintf("%v", v), nil
+	}
+}
+
 // insertClickHouseBatch ClickHouse批量插入
-func (g *DataGenerator) insertClickHouseBatch(baseID int64, batchSize int) error {
+func (g *DataGenerator) insertClickHouseBatch(batchData [][]interface{}) error {
+	if len(batchData) == 0 || len(g.schema) == 0 {
+		return fmt.Errorf("no data or schema available for insert")
+	}
+
+	// 构建列名列表
+	var columnNames []string
+	for _, col := range g.schema {
+		columnNames = append(columnNames, fmt.Sprintf("`%s`", col.Name))
+	}
+
 	// 构建VALUES子句
 	var valuesParts []string
-	for i := 0; i < batchSize; i++ {
-		rowData := g.generateRowData(baseID + int64(i))
-		valuesStr := fmt.Sprintf("(%d, '%s', %d, %.2f, %f, %f, %d, '%s', '%s', '%s', '%s', '%s', '%s', %d, %d, %d)",
-			rowData[0],  // id
-			rowData[1],  // name
-			rowData[2],  // age
-			rowData[3],  // salary
-			rowData[4],  // score
-			rowData[5],  // weight
-			rowData[6],  // is_active
-			rowData[7].(time.Time).Format("2006-01-02"), // birth_date
-			rowData[8].(time.Time).Format("2006-01-02 15:04:05"), // created_at
-			rowData[9].(time.Time).Format("2006-01-02 15:04:05"), // updated_timestamp
-			strings.ReplaceAll(fmt.Sprintf("%v", rowData[10]), "'", "\\'"), // description
-			strings.ReplaceAll(fmt.Sprintf("%v", rowData[11]), "'", "\\'"), // metadata
-			rowData[12], // category
-			rowData[13], // small_num
-			rowData[14], // medium_num
-			rowData[15]) // big_num
+	for _, rowData := range batchData {
+		if len(rowData) != len(g.schema) {
+			return fmt.Errorf("row data length (%d) doesn't match schema length (%d)", len(rowData), len(g.schema))
+		}
+
+		var values []string
+		for i, value := range rowData {
+			col := g.schema[i]
+			formattedValue, err := g.formatValueForClickHouse(value, col)
+			if err != nil {
+				return fmt.Errorf("failed to format value for column %s: %w", col.Name, err)
+			}
+			values = append(values, formattedValue)
+		}
+
+		valuesStr := fmt.Sprintf("(%s)", strings.Join(values, ", "))
 		valuesParts = append(valuesParts, valuesStr)
 	}
 
-	insertSQL := fmt.Sprintf(`INSERT INTO %s
-		(id, name, age, salary, score, weight, is_active, birth_date, created_at, updated_timestamp, description, metadata, category, small_num, medium_num, big_num)
-		VALUES %s`, g.options.Table, strings.Join(valuesParts, ", "))
+	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s) VALUES %s`,
+		g.options.Table,
+		strings.Join(columnNames, ", "),
+		strings.Join(valuesParts, ", "))
+
+	g.logger.Debugf("ClickHouse Insert SQL: %s", insertSQL)
 
 	if _, err := g.db.ExecContext(g.ctx, insertSQL); err != nil {
 		return err
@@ -411,61 +812,48 @@ func (g *DataGenerator) insertClickHouseBatch(baseID int64, batchSize int) error
 }
 
 // insertStarRocksBatch StarRocks批量插入
-func (g *DataGenerator) insertStarRocksBatch(baseID int64, batchSize int) error {
+func (g *DataGenerator) insertStarRocksBatch(batchData [][]interface{}) error {
+	if len(batchData) == 0 || len(g.schema) == 0 {
+		return fmt.Errorf("no data or schema available for insert")
+	}
+
+	// 构建列名列表
+	var columnNames []string
+	for _, col := range g.schema {
+		columnNames = append(columnNames, fmt.Sprintf("`%s`", col.Name))
+	}
+
 	// 构建VALUES子句
 	var valuesParts []string
-	for i := 0; i < batchSize; i++ {
-		rowData := g.generateRowData(baseID + int64(i))
-		valuesStr := fmt.Sprintf("(%d, '%s', %d, %.2f, %f, %f, %t, '%s', '%s', '%s', '%s', '%s', '%s', %d, %d, %d)",
-			rowData[0],  // id
-			rowData[1],  // name
-			rowData[2],  // age
-			rowData[3],  // salary
-			rowData[4],  // score
-			rowData[5],  // weight
-			rowData[6].(int) == 1, // is_active (StarRocks支持布尔值)
-			rowData[7].(time.Time).Format("2006-01-02"), // birth_date
-			rowData[8].(time.Time).Format("2006-01-02 15:04:05"), // created_at
-			rowData[9].(time.Time).Format("2006-01-02 15:04:05"), // updated_timestamp
-			strings.ReplaceAll(fmt.Sprintf("%v", rowData[10]), "'", "\\'"), // description
-			strings.ReplaceAll(fmt.Sprintf("%v", rowData[11]), "'", "\\'"), // metadata
-			rowData[12], // category
-			rowData[13], // small_num
-			rowData[14], // medium_num
-			rowData[15]) // big_num
+	for _, rowData := range batchData {
+		if len(rowData) != len(g.schema) {
+			return fmt.Errorf("row data length (%d) doesn't match schema length (%d)", len(rowData), len(g.schema))
+		}
+
+		var values []string
+		for i, value := range rowData {
+			col := g.schema[i]
+			formattedValue, err := g.formatValueForStarRocks(value, col)
+			if err != nil {
+				return fmt.Errorf("failed to format value for column %s: %w", col.Name, err)
+			}
+			values = append(values, formattedValue)
+		}
+
+		valuesStr := fmt.Sprintf("(%s)", strings.Join(values, ", "))
 		valuesParts = append(valuesParts, valuesStr)
 	}
 
-	insertSQL := fmt.Sprintf(`INSERT INTO %s
-		(id, name, age, salary, score, weight, is_active, birth_date, created_at, updated_timestamp, description, metadata, category, small_num, medium_num, big_num)
-		VALUES %s`, g.options.Table, strings.Join(valuesParts, ", "))
+	insertSQL := fmt.Sprintf(`INSERT INTO %s (%s) VALUES %s`,
+		g.options.Table,
+		strings.Join(columnNames, ", "),
+		strings.Join(valuesParts, ", "))
+
+	g.logger.Debugf("StarRocks Insert SQL: %s", insertSQL)
 
 	if _, err := g.db.ExecContext(g.ctx, insertSQL); err != nil {
 		return err
 	}
 
 	return nil
-}
-
-func (g *DataGenerator) generateRowData(id int64) []interface{} {
-	r := rand.New(rand.NewSource(time.Now().UnixNano() + id))
-
-	return []interface{}{
-		id,                         // id
-		fmt.Sprintf("user_%d", id), // name
-		20 + r.Intn(60),            // age (20-79)
-		float64(30000+r.Intn(170000)) + r.Float64(), // salary (30000-200000)
-		r.Float32() * 100,      // score (0-100)
-		50.0 + r.Float64()*100, // weight (50-150)
-		r.Intn(2),              // is_active (0 or 1)
-		time.Date(1980+r.Intn(40), time.Month(1+r.Intn(12)), 1+r.Intn(28), 0, 0, 0, 0, time.UTC), // birth_date
-		time.Now().Add(-time.Duration(r.Intn(365*5)) * 24 * time.Hour),                           // created_at (last 5 years)
-		time.Now().Add(-time.Duration(r.Intn(365)) * 24 * time.Hour),                             // updated_timestamp (last year)
-		fmt.Sprintf("Description for user %d with random content %d", id, r.Intn(1000)),          // description
-		fmt.Sprintf(`{"user_id": %d, "level": %d, "tags": ["tag1", "tag2"]}`, id, r.Intn(10)),    // metadata
-		fmt.Sprintf("CAT%d", r.Intn(10)),                                                         // category (CAT0-CAT9)
-		r.Intn(256),                                                                              // small_num (0-255)
-		r.Intn(65536),                                                                            // medium_num (0-65535)
-		int64(r.Intn(1000000)),                                                                   // big_num (0-999999)
-	}
 }
