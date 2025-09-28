@@ -244,6 +244,7 @@ func (t *SyncTask) Execute(ctx context.Context) error {
 	// 输出同步设置和限制
 	t.logger.Infof("Sync Settings:")
 	t.logger.Infof("  Batch Size: %d rows per batch", t.config.Settings.BatchSize)
+	t.logger.Infof("  Batch Interval: %v (rest time between batches)", t.config.Settings.BatchInterval)
 	t.logger.Infof("  Parallel Tables: %d", t.config.Settings.ParallelTables)
 
 	if t.config.Settings.RateLimit.MaxBytesPerSecond > 0 {
@@ -396,6 +397,19 @@ func (t *SyncTask) syncTable(ctx context.Context, tableIndex int) error {
 	t.logger.Infof("🔄 Starting table sync: %s.%s -> %s.%s",
 		t.config.Reader.Database, sourceTable,
 		t.config.Writer.Database, targetTable)
+
+	// 统计要同步的数据量
+	t.logger.Infof("📊 Calculating data volume to sync...")
+	dataCount, err := t.countSourceData(ctx, sourceTable)
+	if err != nil {
+		t.logger.Warnf("⚠️ Failed to count source data: %v, proceeding with sync", err)
+	} else {
+		t.logger.Infof("📋 Data volume to sync: %d rows from %s.%s",
+			dataCount, t.config.Reader.Database, sourceTable)
+		if dataCount == 0 {
+			t.logger.Warnf("⚠️ No data found in source table %s.%s", t.config.Reader.Database, sourceTable)
+		}
+	}
 
 	// 构建数据查询和同步流程
 	t.logger.Debugf("Building data converter and select query...")
@@ -1074,6 +1088,12 @@ func (t *SyncTask) transferData(ctx context.Context, reader DataReader, writer D
 			// 清空批次
 			batch = batch[:0]
 
+			// 批次间隔休息
+			if t.config.Settings.BatchInterval > 0 {
+				t.logger.Debugf("Batch interval sleep for %v", t.config.Settings.BatchInterval)
+				time.Sleep(t.config.Settings.BatchInterval)
+			}
+
 			// 应用速率限制
 			if t.config.Settings.RateLimit.MaxBytesPerSecond > 0 || t.config.Settings.RateLimit.MaxRowsPerSecond > 0 {
 				time.Sleep(time.Millisecond * 10) // 简单的速率控制
@@ -1154,30 +1174,201 @@ func (r *MySQLDataReader) GetRecord() (interface{}, error) {
 	jsonObj := make(map[string]interface{})
 	for i, val := range values {
 		columnName := columns[i]
+
+		// TODO: 支持通过配置文件对表的同步字段进行过滤
+		if columnName == "requestHeadIps" || columnName == "requestBodyIps" ||
+			columnName == "urlDomain" || columnName == "urlParameters" || columnName == "urlPath" ||
+			columnName == "xForwardedForIps" || columnName == "requestHeadXRealIp" {
+			r.logger.Debugf("Column %s is drop by human", columnName)
+			continue
+		}
+
+		// TODO: 支持通过配置文件固定表的字段值，来临时解决数据分区不存在的问题
+		if columnName == "recordTimestamp" {
+			jsonObj[columnName] = 1740924169
+			continue
+		}
+
 		if val == nil {
-			jsonObj[columnName] = nil
+			r.logger.Debugf("Column %s is NULL, drop it", columnName)
 		} else {
-			// 正确处理不同数据类型，特别是字节数组
+			// 正确处理不同数据类型，特别是字节数组和数组类型
 			switch v := val.(type) {
 			case []byte:
-				// 字节数组转换为字符串，并处理特定字段
+				// 字节数组转换为字符串
 				strVal := string(v)
-				jsonObj[columnName] = r.processFieldValue(columnName, strVal)
+				// 尝试解析为数组或JSON对象
+				parsedVal, err := r.parseArrayOrJSON(strVal)
+				if err == nil {
+					// 成功解析为数组或对象，使用解析后的值
+					jsonObj[columnName] = parsedVal
+				} else {
+					// 解析失败，作为普通字符串处理
+					jsonObj[columnName] = strVal
+				}
 			case string:
-				// 字符串直接处理特定字段
-				jsonObj[columnName] = r.processFieldValue(columnName, v)
-			case time.Time:
-				// 时间类型特殊处理
-				jsonObj[columnName] = r.processTimeField(columnName, v)
+				// 字符串类型，尝试解析为数组或JSON对象
+				parsedVal, err := r.parseArrayOrJSON(v)
+				if err == nil {
+					jsonObj[columnName] = parsedVal
+				} else {
+					jsonObj[columnName] = v
+				}
+			// case time.Time:
+			// 	// 时间类型特殊处理
+			// 	jsonObj[columnName] = r.processTimeField(columnName, v)
+			case int64, int32, int16, int8, int:
+				// 整数类型直接使用
+				jsonObj[columnName] = v
+			case uint64, uint32, uint16, uint8, uint:
+				// 无符号整数类型直接使用
+				jsonObj[columnName] = v
+			case float32, float64:
+				// 浮点数类型直接使用
+				jsonObj[columnName] = v
+			case bool:
+				// 布尔类型直接使用
+				jsonObj[columnName] = v
 			default:
 				// 其他类型转换为字符串
 				strVal := fmt.Sprintf("%v", v)
-				jsonObj[columnName] = r.processFieldValue(columnName, strVal)
+				jsonObj[columnName] = strVal
 			}
 		}
 	}
 
 	return jsonObj, nil
+}
+
+// parseArrayOrJSON 尝试解析字符串为数组或JSON对象
+func (r *MySQLDataReader) parseArrayOrJSON(strVal string) (interface{}, error) {
+	// 去除首尾空格
+	strVal = strings.TrimSpace(strVal)
+
+	// 检查是否是数组格式 [...]
+	if strings.HasPrefix(strVal, "[") && strings.HasSuffix(strVal, "]") {
+		var arr []interface{}
+		err := json.Unmarshal([]byte(strVal), &arr)
+		if err == nil {
+			return arr, nil
+		}
+		// 如果标准JSON解析失败，尝试处理ClickHouse特殊格式
+		return r.parseClickHouseArray(strVal)
+	}
+
+	// 检查是否是JSON对象格式 {...}
+	if strings.HasPrefix(strVal, "{") && strings.HasSuffix(strVal, "}") {
+		var obj map[string]interface{}
+		err := json.Unmarshal([]byte(strVal), &obj)
+		if err == nil {
+			return obj, nil
+		}
+	}
+
+	// 不是数组或对象格式
+	return nil, fmt.Errorf("not an array or JSON object")
+}
+
+// parseClickHouseArray 解析ClickHouse特殊格式的数组
+// ClickHouse数组格式示例: [1,2,3] 或 ['a','b','c'] 或 [1.5,2.5,3.5]
+func (r *MySQLDataReader) parseClickHouseArray(strVal string) (interface{}, error) {
+	// 移除首尾的方括号
+	if len(strVal) < 2 {
+		return nil, fmt.Errorf("invalid array format")
+	}
+
+	content := strVal[1 : len(strVal)-1]
+	content = strings.TrimSpace(content)
+
+	// 空数组
+	if content == "" {
+		return []interface{}{}, nil
+	}
+
+	// 尝试按逗号分割元素（需要考虑引号内的逗号）
+	elements := r.splitArrayElements(content)
+
+	result := make([]interface{}, 0, len(elements))
+	for _, elem := range elements {
+		elem = strings.TrimSpace(elem)
+
+		// 处理字符串元素（带引号）
+		if (strings.HasPrefix(elem, "'") && strings.HasSuffix(elem, "'")) ||
+			(strings.HasPrefix(elem, "\"") && strings.HasSuffix(elem, "\"")) {
+			// 去除引号
+			unquoted := elem[1 : len(elem)-1]
+			// 处理转义字符
+			unquoted = strings.ReplaceAll(unquoted, "\\'", "'")
+			unquoted = strings.ReplaceAll(unquoted, "\\\"", "\"")
+			result = append(result, unquoted)
+			continue
+		}
+
+		// 尝试解析为整数
+		if intVal, err := strconv.ParseInt(elem, 10, 64); err == nil {
+			result = append(result, intVal)
+			continue
+		}
+
+		// 尝试解析为浮点数
+		if floatVal, err := strconv.ParseFloat(elem, 64); err == nil {
+			result = append(result, floatVal)
+			continue
+		}
+
+		// 尝试解析为布尔值
+		if elem == "true" || elem == "false" {
+			result = append(result, elem == "true")
+			continue
+		}
+
+		// 默认作为字符串
+		result = append(result, elem)
+	}
+
+	return result, nil
+}
+
+// splitArrayElements 按逗号分割数组元素，考虑引号内的逗号
+func (r *MySQLDataReader) splitArrayElements(content string) []string {
+	var elements []string
+	var current strings.Builder
+	inQuote := false
+	quoteChar := rune(0)
+
+	for i, ch := range content {
+		switch ch {
+		case '\'', '"':
+			if !inQuote {
+				inQuote = true
+				quoteChar = ch
+			} else if ch == quoteChar {
+				// 检查是否是转义的引号
+				if i > 0 && content[i-1] != '\\' {
+					inQuote = false
+					quoteChar = 0
+				}
+			}
+			current.WriteRune(ch)
+		case ',':
+			if !inQuote {
+				// 逗号在引号外，分割元素
+				elements = append(elements, current.String())
+				current.Reset()
+			} else {
+				current.WriteRune(ch)
+			}
+		default:
+			current.WriteRune(ch)
+		}
+	}
+
+	// 添加最后一个元素
+	if current.Len() > 0 {
+		elements = append(elements, current.String())
+	}
+
+	return elements
 }
 
 // processFieldValue 处理特定字段的值
@@ -1409,7 +1600,7 @@ func (w *HTTPDataWriter) writeToStarRocks(ctx context.Context, data []interface{
 	jsonBuffer := bytes.NewBuffer(dataByte)
 
 	// 打印HTTP请求body数据用于调试
-	w.logger.Infof("Put Data: %s", string(dataByte))
+	w.logger.Debugf("Put Data: %s", string(dataByte))
 
 	req, err := http.NewRequestWithContext(ctx, "PUT", w.endpoint, jsonBuffer)
 	if err != nil {
@@ -1419,7 +1610,7 @@ func (w *HTTPDataWriter) writeToStarRocks(ctx context.Context, data []interface{
 	// 设置StarRocks Stream Load特定的请求头
 	SetStarRocksStreamLoadHeaders(req, w.userName, w.password)
 
-	w.logger.Infof("stream Load to StarRocks table %s at %s using JSON format", w.table, w.endpoint)
+	w.logger.Debugf("stream Load to StarRocks table %s at %s using JSON format", w.table, w.endpoint)
 
 	resp, err := w.client.Do(req)
 	if err != nil {
@@ -1448,15 +1639,15 @@ func (w *HTTPDataWriter) writeToStarRocks(ctx context.Context, data []interface{
 	}
 
 	// 记录详细的加载统计信息
-	w.logger.Infof("✓ StarRocks Stream Load successful for table %s:", w.table)
-	w.logger.Infof("  - Transaction ID: %d", loadResponse.TxnId)
-	w.logger.Infof("  - Label: %s", loadResponse.Label)
-	w.logger.Infof("  - Status: %s", loadResponse.Status)
-	w.logger.Infof("  - Total Rows: %d", loadResponse.NumberTotalRows)
-	w.logger.Infof("  - Loaded Rows: %d", loadResponse.NumberLoadedRows)
-	w.logger.Infof("  - Filtered Rows: %d", loadResponse.NumberFilteredRows)
-	w.logger.Infof("  - Load Bytes: %d", loadResponse.LoadBytes)
-	w.logger.Infof("  - Load Time: %dms", loadResponse.LoadTimeMs)
+	w.logger.Debugf("✓ StarRocks Stream Load successful for table %s:", w.table)
+	w.logger.Debugf("  - Transaction ID: %d", loadResponse.TxnId)
+	w.logger.Debugf("  - Label: %s", loadResponse.Label)
+	w.logger.Debugf("  - Status: %s", loadResponse.Status)
+	w.logger.Debugf("  - Total Rows: %d", loadResponse.NumberTotalRows)
+	w.logger.Debugf("  - Loaded Rows: %d", loadResponse.NumberLoadedRows)
+	w.logger.Debugf("  - Filtered Rows: %d", loadResponse.NumberFilteredRows)
+	w.logger.Debugf("  - Load Bytes: %d", loadResponse.LoadBytes)
+	w.logger.Debugf("  - Load Time: %dms", loadResponse.LoadTimeMs)
 
 	if loadResponse.NumberFilteredRows > 0 {
 		w.logger.Warnf("⚠️ Warning: %d rows were filtered during load", loadResponse.NumberFilteredRows)
@@ -2427,4 +2618,111 @@ func (t *SyncTask) convertToStarRocksType(col ColumnInfo) string {
 		t.logger.Warnf("Unknown data type: %s, converting to VARCHAR", dataType)
 		return "VARCHAR(65533)"
 	}
+}
+
+// countSourceData 统计源表的数据量
+func (t *SyncTask) countSourceData(ctx context.Context, sourceTable string) (int64, error) {
+	// 构建COUNT查询，使用相同的data_range条件
+	var countQuery string
+	if t.config.Settings.DataRange.TimeColumn != "" {
+		var conditions []string
+		if t.config.Settings.DataRange.StartTime != "" {
+			conditions = append(conditions, fmt.Sprintf("`%s` >= '%s'",
+				t.config.Settings.DataRange.TimeColumn,
+				t.config.Settings.DataRange.StartTime))
+		}
+		if t.config.Settings.DataRange.EndTime != "" {
+			conditions = append(conditions, fmt.Sprintf("`%s` <= '%s'",
+				t.config.Settings.DataRange.TimeColumn,
+				t.config.Settings.DataRange.EndTime))
+		}
+
+		if len(conditions) > 0 {
+			countQuery = fmt.Sprintf("SELECT COUNT(*) FROM `%s`.`%s` WHERE %s",
+				t.config.Reader.Database, sourceTable, strings.Join(conditions, " AND "))
+		} else {
+			countQuery = fmt.Sprintf("SELECT COUNT(*) FROM `%s`.`%s`",
+				t.config.Reader.Database, sourceTable)
+		}
+	} else {
+		countQuery = fmt.Sprintf("SELECT COUNT(*) FROM `%s`.`%s`",
+			t.config.Reader.Database, sourceTable)
+	}
+
+	t.logger.Debugf("Count query: %s", countQuery)
+
+	// 根据vendor获取数据库配置
+	sourceConfig, err := t.getVendorConfig(t.config.Reader.Vendor, t.config.Reader.Name)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get source config: %w", err)
+	}
+
+	// 执行COUNT查询
+	switch t.config.Reader.Vendor {
+	case "clickhouse":
+		return t.countDataClickHouse(ctx, sourceConfig, countQuery)
+	case "starrocks":
+		return t.countDataStarRocks(ctx, sourceConfig, countQuery)
+	default:
+		return 0, fmt.Errorf("unsupported reader vendor: %s", t.config.Reader.Vendor)
+	}
+}
+
+// countDataClickHouse 通过ClickHouse执行COUNT查询
+func (t *SyncTask) countDataClickHouse(ctx context.Context, dbConfig interface{}, query string) (int64, error) {
+	chConfig := dbConfig.(*config.ClickHouseConfig)
+
+	// 根据协议选择连接方式
+	switch t.config.Reader.Protocol {
+	case "mysql":
+		if chConfig.MySQL == nil {
+			return 0, fmt.Errorf("ClickHouse MySQL configuration missing")
+		}
+		return t.countDataMySQL(ctx, chConfig.MySQL, query)
+	default:
+		return 0, fmt.Errorf("unsupported ClickHouse protocol for count: %s", t.config.Reader.Protocol)
+	}
+}
+
+// countDataStarRocks 通过StarRocks执行COUNT查询
+func (t *SyncTask) countDataStarRocks(ctx context.Context, dbConfig interface{}, query string) (int64, error) {
+	srConfig := dbConfig.(*config.StarRocksConfig)
+
+	// 根据协议选择连接方式
+	switch t.config.Reader.Protocol {
+	case "mysql":
+		if srConfig.MySQL == nil {
+			return 0, fmt.Errorf("StarRocks MySQL configuration missing")
+		}
+		return t.countDataMySQL(ctx, srConfig.MySQL, query)
+	default:
+		return 0, fmt.Errorf("unsupported StarRocks protocol for count: %s", t.config.Reader.Protocol)
+	}
+}
+
+// countDataMySQL 通过MySQL协议执行COUNT查询
+func (t *SyncTask) countDataMySQL(ctx context.Context, mysqlConfig *config.MySQLConfig, query string) (int64, error) {
+	// 构建连接字符串
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/",
+		mysqlConfig.Username, mysqlConfig.Password,
+		mysqlConfig.Host, mysqlConfig.Port)
+
+	// 连接数据库
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return 0, fmt.Errorf("failed to connect to MySQL: %w", err)
+	}
+	defer db.Close()
+
+	// 设置连接超时
+	db.SetConnMaxLifetime(mysqlConfig.Timeout)
+
+	// 执行COUNT查询
+	var count int64
+	err = db.QueryRowContext(ctx, query).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to execute count query: %w", err)
+	}
+
+	return count, nil
 }

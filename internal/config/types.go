@@ -95,6 +95,7 @@ type SyncSettingsConfig struct {
 	ColumnMapping         map[string]string            `yaml:"column_mapping"`
 	TableSpecificSettings map[string]TableSpecificConfig `yaml:"table_specific_settings"`
 	BatchSize             int                          `yaml:"batch_size"`
+	BatchInterval         time.Duration                `yaml:"batch_interval"` // 新增：批次间隔时间
 	CSVFormat             CSVFormatConfig              `yaml:"csv_format"`
 	ParallelTables        int                          `yaml:"parallel_tables"`
 }

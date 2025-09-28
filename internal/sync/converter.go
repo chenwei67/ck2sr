@@ -44,10 +44,5 @@ func (dc *DataConverter) BuildSelectQuery(database, table string) string {
 		}
 	}
 
-	// 添加限制（用于测试或小批量处理）
-	if dc.config.Settings.BatchSize > 0 {
-		query += fmt.Sprintf(" LIMIT %d", dc.config.Settings.BatchSize)
-	}
-
 	return query
 }

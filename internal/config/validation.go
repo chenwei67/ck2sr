@@ -271,6 +271,11 @@ func validateSyncSettings(settings *SyncSettingsConfig, taskID string) error {
 		return fmt.Errorf("task %s: batch_size must be positive", taskID)
 	}
 
+	// 设置BatchInterval默认值为5秒
+	if settings.BatchInterval <= 0 {
+		settings.BatchInterval = 5 * time.Second
+	}
+
 	if settings.ParallelTables <= 0 {
 		return fmt.Errorf("task %s: parallel_tables must be positive", taskID)
 	}
