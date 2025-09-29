@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/ck2sr/ck2sr/cmd/dtool/commands"
+	"github.com/sunkaimr/ck2sr/cmd/dtool/commands"
 )
 
 const version = "1.0.0"

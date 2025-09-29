@@ -8,7 +8,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"gopkg.in/natefinch/lumberjack.v2"
 
-	"github.com/ck2sr/ck2sr/internal/config"
+	"github.com/sunkaimr/ck2sr/internal/config"
 )
 
 // CreateLogger 根据配置创建logger实例

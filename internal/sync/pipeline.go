@@ -1,0 +1,371 @@
+package sync
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/sirupsen/logrus"
+	"github.com/sunkaimr/ck2sr/internal/config"
+	"github.com/sunkaimr/ck2sr/internal/reader"
+	"github.com/sunkaimr/ck2sr/internal/storage"
+	"github.com/sunkaimr/ck2sr/internal/writer"
+	"github.com/sunkaimr/ck2sr/pkg/protocol"
+)
+
+// Pipeline 异步数据处理管道
+// 支持Channel-based数据流、Writer并发和Offset持久化
+type Pipeline struct {
+	config  *config.SyncTaskConfig
+	policy  *config.PolicyConfig
+	logger  *logrus.Logger
+	reader  protocol.DataReader
+	writer  protocol.DataWriter
+	monitor *Monitor
+	storage storage.Storage
+
+	// 异步处理相关
+	dataChan    chan DataBatch    // 数据批次通道
+	errorChan   chan error        // 错误通道
+	progressChan chan ProgressInfo // 进度通道
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+
+	// 统计信息
+	stats       *PipelineStats
+	statsMu     sync.RWMutex
+}
+
+// DataBatch 数据批次结构
+type DataBatch struct {
+	Data   []interface{} // 数据记录
+	Offset int64         // 当前偏移量
+	Table  string        // 表名
+}
+
+// ProgressInfo 进度信息
+type ProgressInfo struct {
+	Table       string
+	Offset      int64
+	ProcessedRows int64
+	BatchCount  int
+}
+
+// NewPipeline 创建新的异步Pipeline
+func NewPipeline(cfg *config.SyncTaskConfig, policy *config.PolicyConfig, logger *logrus.Logger) *Pipeline {
+	return &Pipeline{
+		config:  cfg,
+		policy:  policy,
+		logger:  logger,
+		monitor: NewMonitor(cfg.TaskID, logger),
+		stats: &PipelineStats{
+			StartTime: time.Now(),
+		},
+		// 初始化channel，缓冲区大小为配置的并发数*2
+		dataChan:     make(chan DataBatch, policy.Transfer.WriterConcurrency*2),
+		errorChan:    make(chan error, policy.Transfer.WriterConcurrency),
+		progressChan: make(chan ProgressInfo, 100),
+	}
+}
+
+// SetStorage 设置存储接口，用于Offset持久化
+func (p *Pipeline) SetStorage(storage storage.Storage) {
+	p.storage = storage
+}
+
+// Initialize 初始化Pipeline组件
+func (p *Pipeline) Initialize(ctx context.Context) error {
+	readerFactory := reader.NewReaderFactory()
+	writerFactory := writer.NewWriterFactory()
+
+	var err error
+	p.reader, err = readerFactory.Create(&p.config.Reader)
+	if err != nil {
+		return fmt.Errorf("failed to create reader: %w", err)
+	}
+
+	p.writer, err = writerFactory.Create(&p.config.Writer)
+	if err != nil {
+		return fmt.Errorf("failed to create writer: %w", err)
+	}
+
+	p.logger.Infof("Pipeline initialized with %d writer concurrency", p.policy.Transfer.WriterConcurrency)
+	return nil
+}
+
+// Process 异步处理表数据，支持Offset和并发Writer
+func (p *Pipeline) Process(ctx context.Context, table string) error {
+	p.logger.Infof("Starting async pipeline for table: %s with %d writers", table, p.policy.Transfer.WriterConcurrency)
+	p.monitor.StartTable(table)
+
+	// 创建带取消的上下文
+	ctx, cancel := context.WithCancel(ctx)
+	p.cancel = cancel
+	defer cancel()
+
+	defer func() {
+		p.monitor.EndTable(table)
+		if p.reader != nil {
+			p.reader.Close()
+		}
+		if p.writer != nil {
+			p.writer.Close()
+		}
+		p.updateEndTime()
+	}()
+
+	// 启动并发Writer goroutines
+	for i := 0; i < p.policy.Transfer.WriterConcurrency; i++ {
+		p.wg.Add(1)
+		go p.writerWorker(ctx, i)
+	}
+
+	// 启动进度监控goroutine
+	p.wg.Add(1)
+	go p.progressMonitor(ctx, table)
+
+	// 主读取循环
+	err := p.readData(ctx, table)
+	if err != nil {
+		p.logger.Errorf("Reader error: %v", err)
+		return err
+	}
+
+	// 关闭数据通道，等待writers完成
+	close(p.dataChan)
+	p.wg.Wait()
+
+	// 检查是否有错误
+	select {
+	case err := <-p.errorChan:
+		return fmt.Errorf("writer error: %w", err)
+	default:
+	}
+
+	p.logger.Infof("Async pipeline completed for table %s: %d batches, %d rows",
+		table, p.getStats().BatchCount, p.getStats().TotalRows)
+	return nil
+}
+
+// readData 主读取循环，负责从数据源读取数据并发送到channel
+func (p *Pipeline) readData(ctx context.Context, table string) error {
+	batchCount := 0
+	currentOffset := int64(0)
+
+	// 如果reader支持OffsetReader，尝试设置offset
+	if offsetReader, ok := p.reader.(protocol.OffsetReader); ok {
+		currentOffset = offsetReader.GetOffset()
+		p.logger.Infof("Starting read from offset: %d", currentOffset)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// 检查是否还有数据
+		if !p.reader.Next() {
+			break
+		}
+
+		// 构建数据批次
+		batch := make([]interface{}, 0, p.config.Settings.BatchSize)
+		for i := 0; i < p.config.Settings.BatchSize; i++ {
+			record, err := p.reader.GetRecord()
+			if err != nil {
+				return fmt.Errorf("failed to get record: %w", err)
+			}
+			batch = append(batch, record)
+			currentOffset++
+
+			// 检查是否还有更多数据
+			if !p.reader.Next() {
+				break
+			}
+		}
+
+		if len(batch) == 0 {
+			break
+		}
+
+		// 发送数据批次到channel
+		dataBatch := DataBatch{
+			Data:   batch,
+			Offset: currentOffset,
+			Table:  table,
+		}
+
+		select {
+		case p.dataChan <- dataBatch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+
+		batchCount++
+		p.updateBatchCount(1)
+
+		// 限速控制
+		if p.policy.Transfer.RateLimitSleep > 0 {
+			time.Sleep(p.policy.Transfer.RateLimitSleep)
+		}
+	}
+
+	p.logger.Infof("Read completed: %d batches read", batchCount)
+	return nil
+}
+
+// writerWorker 并发Writer工作者，处理数据写入
+func (p *Pipeline) writerWorker(ctx context.Context, workerID int) {
+	defer p.wg.Done()
+	p.logger.Debugf("Writer worker %d started", workerID)
+
+	for {
+		select {
+		case batch, ok := <-p.dataChan:
+			if !ok {
+				p.logger.Debugf("Writer worker %d: data channel closed", workerID)
+				return
+			}
+
+			// 处理数据批次
+			if err := p.processBatch(ctx, batch, workerID); err != nil {
+				select {
+				case p.errorChan <- err:
+				default:
+					p.logger.Errorf("Error channel full, dropping error: %v", err)
+				}
+				return
+			}
+
+			// 发送进度更新
+			progress := ProgressInfo{
+				Table:       batch.Table,
+				Offset:      batch.Offset,
+				ProcessedRows: int64(len(batch.Data)),
+				BatchCount:  1,
+			}
+
+			select {
+			case p.progressChan <- progress:
+			default:
+				// 进度通道已满，丢弃进度信息
+			}
+
+		case <-ctx.Done():
+			p.logger.Debugf("Writer worker %d: context cancelled", workerID)
+			return
+		}
+	}
+}
+
+// processBatch 处理单个数据批次
+func (p *Pipeline) processBatch(ctx context.Context, batch DataBatch, workerID int) error {
+	// 写入数据
+	if err := p.writer.Write(ctx, batch.Data); err != nil {
+		return fmt.Errorf("worker %d failed to write batch: %w", workerID, err)
+	}
+
+	// 刷新数据
+	if err := p.writer.Flush(ctx); err != nil {
+		return fmt.Errorf("worker %d failed to flush batch: %w", workerID, err)
+	}
+
+	p.monitor.AddRows(batch.Table, int64(len(batch.Data)))
+	p.updateProcessedRows(int64(len(batch.Data)))
+
+	return nil
+}
+
+// progressMonitor 监控进度并定期输出
+func (p *Pipeline) progressMonitor(ctx context.Context, table string) {
+	defer p.wg.Done()
+
+	ticker := time.NewTicker(time.Duration(p.policy.Transfer.ProgressReportEvery) * time.Second)
+	defer ticker.Stop()
+
+	lastReportTime := time.Now()
+	lastProcessedRows := int64(0)
+
+	for {
+		select {
+		case progress := <-p.progressChan:
+			// 处理进度更新
+			_ = progress // 目前先不处理
+
+		case <-ticker.C:
+			// 定期报告进度
+			stats := p.getStats()
+			currentTime := time.Now()
+			duration := currentTime.Sub(lastReportTime)
+			rowsProcessed := stats.TotalRows - lastProcessedRows
+
+			if rowsProcessed > 0 {
+				rowsPerSecond := float64(rowsProcessed) / duration.Seconds()
+				p.logger.Infof("Progress [%s]: %d batches, %d rows, %.2f rows/sec",
+					table, stats.BatchCount, stats.TotalRows, rowsPerSecond)
+			}
+
+			lastReportTime = currentTime
+			lastProcessedRows = stats.TotalRows
+
+		case <-ctx.Done():
+			p.logger.Debugf("Progress monitor stopped for table %s", table)
+			return
+		}
+	}
+}
+
+// ===== 统计信息更新方法 =====
+
+func (p *Pipeline) updateBatchCount(delta int) {
+	p.statsMu.Lock()
+	p.stats.BatchCount += delta
+	p.statsMu.Unlock()
+}
+
+func (p *Pipeline) updateProcessedRows(delta int64) {
+	p.statsMu.Lock()
+	p.stats.TotalRows += delta
+	p.statsMu.Unlock()
+}
+
+func (p *Pipeline) updateEndTime() {
+	p.statsMu.Lock()
+	p.stats.EndTime = time.Now()
+	p.statsMu.Unlock()
+}
+
+func (p *Pipeline) getStats() PipelineStats {
+	p.statsMu.RLock()
+	defer p.statsMu.RUnlock()
+	return *p.stats
+}
+
+// GetStats 获取Pipeline统计信息
+func (p *Pipeline) GetStats() *PipelineStats {
+	stats := p.getStats() // 使用内部方法获取统计
+	// 与监控器数据合并
+	return &PipelineStats{
+		TablesProcessed: p.monitor.GetProcessedTables(),
+		TotalRows:       stats.TotalRows,
+		TotalBytes:      p.monitor.GetTotalBytes(),
+		StartTime:       stats.StartTime,
+		EndTime:         stats.EndTime,
+		BatchCount:      stats.BatchCount,
+		WriterConcurrency: p.policy.Transfer.WriterConcurrency,
+	}
+}
+
+// PipelineStats Pipeline统计信息
+type PipelineStats struct {
+	TablesProcessed   []string  `json:"tables_processed"`   // 已处理的表列表
+	TotalRows         int64     `json:"total_rows"`         // 总处理行数
+	TotalBytes        int64     `json:"total_bytes"`        // 总处理字节数
+	StartTime         time.Time `json:"start_time"`         // 开始时间
+	EndTime           time.Time `json:"end_time"`           // 结束时间
+	BatchCount        int       `json:"batch_count"`        // 已处理批次数
+	WriterConcurrency int       `json:"writer_concurrency"` // Writer并发数
+}

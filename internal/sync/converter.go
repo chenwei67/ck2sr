@@ -4,39 +4,32 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/ck2sr/ck2sr/internal/config"
+	"github.com/sunkaimr/ck2sr/internal/config"
 )
 
 // DataConverter 数据转换器
-type DataConverter struct {
-	config *config.SyncTaskConfig
-}
+type DataConverter struct{}
 
 // NewDataConverter 创建数据转换器
-func NewDataConverter(config *config.SyncTaskConfig) *DataConverter {
-	return &DataConverter{
-		config: config,
-	}
+func NewDataConverter() *DataConverter {
+	return &DataConverter{}
 }
 
-// BuildSelectQuery 构建查询SQL
-func (dc *DataConverter) BuildSelectQuery(database, table string) string {
-	query := fmt.Sprintf("SELECT * FROM `%s`.`%s`", database, table)
+// BuildCountQuery 构建计数查询SQL
+func (dc *DataConverter) BuildCountQuery(dataSource *config.DataSourceConfig, table string, dataRange *config.DataRangeConfig) (string, error) {
+	query := fmt.Sprintf("SELECT COUNT(*) FROM `%s`.`%s`", dataSource.Database, table)
 
-	// 添加数据范围过滤
-	if dc.config.Settings.DataRange.TimeColumn != "" {
+	if dataRange.TimeColumn != "" {
 		var conditions []string
 
-		if dc.config.Settings.DataRange.StartTime != "" {
+		if dataRange.StartTime != "" {
 			conditions = append(conditions, fmt.Sprintf("`%s` >= '%s'",
-				dc.config.Settings.DataRange.TimeColumn,
-				dc.config.Settings.DataRange.StartTime))
+				dataRange.TimeColumn, dataRange.StartTime))
 		}
 
-		if dc.config.Settings.DataRange.EndTime != "" {
+		if dataRange.EndTime != "" {
 			conditions = append(conditions, fmt.Sprintf("`%s` <= '%s'",
-				dc.config.Settings.DataRange.TimeColumn,
-				dc.config.Settings.DataRange.EndTime))
+				dataRange.TimeColumn, dataRange.EndTime))
 		}
 
 		if len(conditions) > 0 {
@@ -44,5 +37,30 @@ func (dc *DataConverter) BuildSelectQuery(database, table string) string {
 		}
 	}
 
-	return query
+	return query, nil
+}
+
+// BuildSelectQuery 构建查询SQL
+func (dc *DataConverter) BuildSelectQuery(dataSource *config.DataSourceConfig, table string, dataRange *config.DataRangeConfig) (string, error) {
+	query := fmt.Sprintf("SELECT * FROM `%s`.`%s`", dataSource.Database, table)
+
+	if dataRange.TimeColumn != "" {
+		var conditions []string
+
+		if dataRange.StartTime != "" {
+			conditions = append(conditions, fmt.Sprintf("`%s` >= '%s'",
+				dataRange.TimeColumn, dataRange.StartTime))
+		}
+
+		if dataRange.EndTime != "" {
+			conditions = append(conditions, fmt.Sprintf("`%s` <= '%s'",
+				dataRange.TimeColumn, dataRange.EndTime))
+		}
+
+		if len(conditions) > 0 {
+			query += " WHERE " + strings.Join(conditions, " AND ")
+		}
+	}
+
+	return query, nil
 }

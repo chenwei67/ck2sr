@@ -24,7 +24,10 @@
       "Bash(tree:*)",
       "Bash(timeout:*)",
       "Bash(./dtool help)",
-      "Bash(./dtool:*)"
+      "Bash(./dtool:*)",
+      "Bash(del engine.go)",
+      "Bash(ren:*)",
+      "Bash(git checkout:*)"
     ],
     "deny": [],
     "ask": []

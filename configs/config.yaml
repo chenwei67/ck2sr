@@ -86,13 +86,52 @@ sync_tasks:
         user_id: "id"
         create_time: "created_at"
       batch_size: 10000        # 批处理大小
-      csv_format:              # CSV导入格式配置
-        delimiter: ","
-        quote_char: "\""
-        escape_char: "\\"
-        null_value: "\\N"
-        header: false
+      batch_interval: "5s"     # 批次间隔时间
       parallel_tables: 2       # 并行处理表的数量
+
+# 全局策略配置
+policy:
+  # 数据传输策略
+  transfer:
+    batch_size: 10000                # 批次大小
+    batch_interval: "5s"             # 批次间隔时间
+    progress_report_every: 10        # 每N批次输出进度
+    progress_report_timeout: "10s"   # 或超过N秒强制输出进度
+    rate_limit_sleep: "10ms"         # 速率控制休眠时间
+    writer_concurrency: 3            # Writer并发数量（新增）
+
+  # 调度策略
+  schedule:
+    check_interval: "1m"       # 时间窗口检查间隔
+    retry_interval: "5m"       # 失败重试间隔
+    max_concurrent_task: 2     # 最大并发任务数
+
+  # HTTP客户端策略
+  http:
+    timeout: "30s"                   # 请求超时
+    idle_conn_timeout: "60s"         # 空闲连接超时
+    tls_handshake_timeout: "10s"     # TLS握手超时
+    max_idle_conns: 100              # 最大空闲连接数
+    max_conns_per_host: 10           # 每个主机最大连接数
+
+  # 数据过滤策略
+  filter:
+    # 需要排除的列（全局配置，可在任务级别覆盖）
+    exclude_columns: []
+      # - "requestHeadIps"
+      # - "requestBodyIps"
+      # - "urlDomain"
+
+    # 固定值列（全局配置，临时方案）
+    fixed_values: {}
+      # recordTimestamp: 1740924169
+
+  # 重试策略（全局默认）
+  retry:
+    max_retries: 3
+    initial_delay: "2s"
+    max_delay: "60s"
+    backoff_factor: 2.0
 
 # 监控配置
 monitor:

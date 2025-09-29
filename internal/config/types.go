@@ -9,6 +9,7 @@ type Config struct {
 	ClickHouse []ClickHouseConfig `yaml:"clickhouse"`
 	StarRocks  []StarRocksConfig  `yaml:"starrocks"`
 	SyncTasks  []SyncTaskConfig   `yaml:"sync_tasks"`
+	Policy     PolicyConfig       `yaml:"policy"`      // 新增：策略配置
 	Monitor    MonitorConfig      `yaml:"monitor"`
 	Log        LogConfig          `yaml:"log"`
 	Service    ServiceConfig      `yaml:"service"`

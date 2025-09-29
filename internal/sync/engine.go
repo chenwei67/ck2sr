@@ -6,30 +6,98 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ck2sr/ck2sr/internal/config"
+	"github.com/sirupsen/logrus"
+	"github.com/sunkaimr/ck2sr/internal/config"
+	"github.com/sunkaimr/ck2sr/internal/scheduler"
+	"github.com/sunkaimr/ck2sr/internal/storage"
 )
 
-// SyncEngine 同步引擎
+// SyncEngine 同步引擎 - 高级同步协调器
+// 专注于跨表和跨库的同步协调，与单表同步作业的Scheduler区分
 type SyncEngine struct {
 	config    *config.Config
-	tasks     map[string]*SyncTask
+	policy    *config.PolicyConfig
+	storage   storage.Storage
+	logger    *logrus.Logger
+	scheduler *scheduler.Scheduler // 关联的任务调度器
 	running   bool
 	mutex     sync.RWMutex
 	ctx       context.Context
 	cancel    context.CancelFunc
-	waitGroup sync.WaitGroup
+
+	// 高级协调功能
+	syncSessions map[string]*SyncSession // 正在运行的同步会话
+	metrics      *SyncMetrics           // 同步指标
+}
+
+// SyncSession 同步会话 - 表示一次完整的数据同步操作
+type SyncSession struct {
+	SessionID   string                 `json:"session_id"`
+	TaskID      string                 `json:"task_id"`
+	StartTime   time.Time              `json:"start_time"`
+	EndTime     time.Time              `json:"end_time"`
+	Status      string                 `json:"status"` // running, completed, failed, cancelled
+	Tables      map[string]*TableStats `json:"tables"`
+	TotalRows   int64                  `json:"total_rows"`
+	TotalBytes  int64                  `json:"total_bytes"`
+	ErrorCount  int                    `json:"error_count"`
+	LastError   string                 `json:"last_error,omitempty"`
+}
+
+// TableStats 表同步统计
+type TableStats struct {
+	TableName     string        `json:"table_name"`
+	StartTime     time.Time     `json:"start_time"`
+	EndTime       time.Time     `json:"end_time"`
+	Duration      time.Duration `json:"duration"`
+	ProcessedRows int64         `json:"processed_rows"`
+	ProcessedBytes int64        `json:"processed_bytes"`
+	Status        string        `json:"status"`
+	Progress      float64       `json:"progress"`
+}
+
+// SyncMetrics 同步指标
+type SyncMetrics struct {
+	TotalSessions    int64     `json:"total_sessions"`
+	ActiveSessions   int       `json:"active_sessions"`
+	SuccessfulSyncs  int64     `json:"successful_syncs"`
+	FailedSyncs      int64     `json:"failed_syncs"`
+	TotalRowsSynced  int64     `json:"total_rows_synced"`
+	TotalBytesSynced int64     `json:"total_bytes_synced"`
+	AverageSpeed     float64   `json:"average_speed"`    // rows per second
+	LastSyncTime     time.Time `json:"last_sync_time"`
+	Uptime           time.Time `json:"uptime"`
+}
+
+// EngineStatus 引擎状态
+type EngineStatus struct {
+	Running        bool                    `json:"running"`
+	ActiveSessions map[string]*SyncSession `json:"active_sessions"`
+	Metrics        *SyncMetrics            `json:"metrics"`
+	SchedulerStats interface{}             `json:"scheduler_stats,omitempty"`
 }
 
 // NewSyncEngine 创建新的同步引擎
-func NewSyncEngine(config *config.Config) *SyncEngine {
+func NewSyncEngine(cfg *config.Config, policy *config.PolicyConfig, store storage.Storage, logger *logrus.Logger) *SyncEngine {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &SyncEngine{
-		config: config,
-		tasks:  make(map[string]*SyncTask),
-		ctx:    ctx,
-		cancel: cancel,
+		config:       cfg,
+		policy:       policy,
+		storage:      store,
+		logger:       logger,
+		ctx:          ctx,
+		cancel:       cancel,
+		syncSessions: make(map[string]*SyncSession),
+		metrics: &SyncMetrics{
+			Uptime: time.Now(),
+		},
 	}
+}
+
+// SetScheduler 设置关联的任务调度器
+func (e *SyncEngine) SetScheduler(scheduler *scheduler.Scheduler) {
+	e.scheduler = scheduler
 }
 
 // Start 启动同步引擎
@@ -41,20 +109,11 @@ func (e *SyncEngine) Start() error {
 		return fmt.Errorf("sync engine is already running")
 	}
 
-	// 初始化同步任务
-	if err := e.initializeTasks(); err != nil {
-		return fmt.Errorf("failed to initialize tasks: %w", err)
-	}
-
 	e.running = true
+	e.logger.Info("⚙️  SyncEngine started - High-level sync coordinator active")
 
-	// 启动各个同步任务
-	for _, task := range e.tasks {
-		if task.IsEnabled() {
-			e.waitGroup.Add(1)
-			go e.runTask(task)
-		}
-	}
+	// 启动指标收集器
+	go e.metricsCollector()
 
 	return nil
 }
@@ -71,9 +130,12 @@ func (e *SyncEngine) Stop() error {
 	e.running = false
 	e.cancel()
 
-	// 等待所有任务完成
-	e.waitGroup.Wait()
+	// 取消所有活跃的同步会话
+	for sessionID := range e.syncSessions {
+		e.cancelSession(sessionID)
+	}
 
+	e.logger.Info("⏹️  SyncEngine stopped")
 	return nil
 }
 
@@ -84,144 +146,116 @@ func (e *SyncEngine) IsRunning() bool {
 	return e.running
 }
 
-// GetTasks 获取所有任务
-func (e *SyncEngine) GetTasks() map[string]*SyncTask {
-	e.mutex.RLock()
-	defer e.mutex.RUnlock()
-
-	tasks := make(map[string]*SyncTask)
-	for id, task := range e.tasks {
-		tasks[id] = task
-	}
-	return tasks
-}
-
-// GetTask 根据ID获取任务
-func (e *SyncEngine) GetTask(taskID string) (*SyncTask, bool) {
-	e.mutex.RLock()
-	defer e.mutex.RUnlock()
-
-	task, exists := e.tasks[taskID]
-	return task, exists
-}
-
-// AddTask 添加同步任务
-func (e *SyncEngine) AddTask(taskConfig *config.SyncTaskConfig) error {
+// StartSyncSession 启动新的同步会话
+func (e *SyncEngine) StartSyncSession(taskID string) (*SyncSession, error) {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
-	if _, exists := e.tasks[taskConfig.TaskID]; exists {
-		return fmt.Errorf("task with ID %s already exists", taskConfig.TaskID)
+	// 生成会话 ID
+	sessionID := fmt.Sprintf("%s_%d", taskID, time.Now().Unix())
+
+	session := &SyncSession{
+		SessionID: sessionID,
+		TaskID:    taskID,
+		StartTime: time.Now(),
+		Status:    "running",
+		Tables:    make(map[string]*TableStats),
 	}
 
-	task, err := NewSyncTask(taskConfig, e.config)
-	if err != nil {
-		return fmt.Errorf("failed to create task %s: %w", taskConfig.TaskID, err)
-	}
+	e.syncSessions[sessionID] = session
+	e.metrics.TotalSessions++
+	e.metrics.ActiveSessions++
 
-	e.tasks[taskConfig.TaskID] = task
-
-	// 如果引擎正在运行且任务启用，立即启动任务
-	if e.running && task.IsEnabled() {
-		e.waitGroup.Add(1)
-		go e.runTask(task)
-	}
-
-	return nil
+	e.logger.Infof("🚀 Started sync session %s for task %s", sessionID, taskID)
+	return session, nil
 }
 
-// RemoveTask 移除同步任务
-func (e *SyncEngine) RemoveTask(taskID string) error {
+// EndSyncSession 结束同步会话
+func (e *SyncEngine) EndSyncSession(sessionID string, success bool, errorMsg string) error {
 	e.mutex.Lock()
 	defer e.mutex.Unlock()
 
-	task, exists := e.tasks[taskID]
+	session, exists := e.syncSessions[sessionID]
 	if !exists {
-		return fmt.Errorf("task with ID %s not found", taskID)
+		return fmt.Errorf("session %s not found", sessionID)
 	}
 
-	// 停止任务
-	if err := task.Stop(); err != nil {
-		return fmt.Errorf("failed to stop task %s: %w", taskID, err)
+	session.EndTime = time.Now()
+	if success {
+		session.Status = "completed"
+		e.metrics.SuccessfulSyncs++
+	} else {
+		session.Status = "failed"
+		session.LastError = errorMsg
+		e.metrics.FailedSyncs++
 	}
 
-	delete(e.tasks, taskID)
+	// 更新指标
+	e.metrics.TotalRowsSynced += session.TotalRows
+	e.metrics.TotalBytesSynced += session.TotalBytes
+	e.metrics.LastSyncTime = time.Now()
+	e.metrics.ActiveSessions--
+
+	// 从活跃会话中移除
+	delete(e.syncSessions, sessionID)
+
+	e.logger.Infof("✅ Ended sync session %s with status: %s", sessionID, session.Status)
 	return nil
 }
 
-// ExecuteTask 手动执行单个任务
-func (e *SyncEngine) ExecuteTask(taskID string) error {
+// UpdateTableProgress 更新表同步进度
+func (e *SyncEngine) UpdateTableProgress(sessionID, tableName string, stats *TableStats) error {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
+	session, exists := e.syncSessions[sessionID]
+	if !exists {
+		return fmt.Errorf("session %s not found", sessionID)
+	}
+
+	session.Tables[tableName] = stats
+
+	// 重新计算会话统计
+	session.TotalRows = 0
+	session.TotalBytes = 0
+	for _, tableStats := range session.Tables {
+		session.TotalRows += tableStats.ProcessedRows
+		session.TotalBytes += tableStats.ProcessedBytes
+	}
+
+	return nil
+}
+
+// GetActiveSessions 获取活跃会话
+func (e *SyncEngine) GetActiveSessions() map[string]*SyncSession {
 	e.mutex.RLock()
-	task, exists := e.tasks[taskID]
-	e.mutex.RUnlock()
+	defer e.mutex.RUnlock()
 
-	if !exists {
-		return fmt.Errorf("task with ID %s not found", taskID)
+	sessions := make(map[string]*SyncSession)
+	for id, session := range e.syncSessions {
+		// 创建副本以避免并发问题
+		sessionCopy := *session
+		sessions[id] = &sessionCopy
 	}
-
-	return task.Execute(e.ctx)
+	return sessions
 }
 
-// initializeTasks 初始化所有任务
-func (e *SyncEngine) initializeTasks() error {
-	tasks := e.config.GetEnabledTasks()
+// GetMetrics 获取同步指标
+func (e *SyncEngine) GetMetrics() *SyncMetrics {
+	e.mutex.RLock()
+	defer e.mutex.RUnlock()
 
-	for _, taskConfig := range tasks {
-		task, err := NewSyncTask(&taskConfig, e.config)
-		if err != nil {
-			return fmt.Errorf("failed to create task %s: %w", taskConfig.TaskID, err)
-		}
-
-		e.tasks[taskConfig.TaskID] = task
-	}
-
-	return nil
-}
-
-// runTask 运行单个任务
-func (e *SyncEngine) runTask(task *SyncTask) {
-	defer e.waitGroup.Done()
-
-	fmt.Printf("🚀 Starting task runner for: %s\n", task.GetName())
-
-	for {
-		select {
-		case <-e.ctx.Done():
-			fmt.Printf("🛑 Task runner stopped by context cancellation: %s\n", task.GetName())
-			return
-		default:
-			// 检查时间窗口
-			if !task.IsInTimeWindow() {
-				// 使用带超时的sleep，以便能够响应取消信号
-				select {
-				case <-e.ctx.Done():
-					fmt.Printf("🛑 Task runner stopped during time window wait: %s\n", task.GetName())
-					return
-				case <-time.After(time.Minute): // 每分钟检查一次时间窗口
-					continue
-				}
-			}
-
-			fmt.Printf("🔄 Executing sync task: %s\n", task.GetName())
-
-			// 执行任务
-			if err := task.Execute(e.ctx); err != nil {
-				fmt.Printf("❌ Task %s execution failed: %v\n", task.GetID(), err)
-			} else {
-				fmt.Printf("✅ Task %s execution completed successfully\n", task.GetID())
-			}
-
-			// 等待下次执行（这里应该根据任务配置决定间隔）
-			// 使用可中断的等待
-			select {
-			case <-e.ctx.Done():
-				fmt.Printf("🛑 Task runner stopped during execution interval: %s\n", task.GetName())
-				return
-			case <-time.After(time.Hour): // 恢复为每小时执行一次
-				// 继续下一轮循环
-			}
+	// 计算平均速度
+	if e.metrics.TotalSessions > 0 {
+		uptime := time.Since(e.metrics.Uptime).Seconds()
+		if uptime > 0 {
+			e.metrics.AverageSpeed = float64(e.metrics.TotalRowsSynced) / uptime
 		}
 	}
+
+	// 返回副本
+	metricsCopy := *e.metrics
+	return &metricsCopy
 }
 
 // GetStatus 获取引擎状态
@@ -230,21 +264,57 @@ func (e *SyncEngine) GetStatus() *EngineStatus {
 	defer e.mutex.RUnlock()
 
 	status := &EngineStatus{
-		Running:    e.running,
-		TaskCount:  len(e.tasks),
-		TaskStatus: make(map[string]*TaskStatus),
+		Running:        e.running,
+		ActiveSessions: e.GetActiveSessions(),
+		Metrics:        e.GetMetrics(),
 	}
 
-	for id, task := range e.tasks {
-		status.TaskStatus[id] = task.GetStatus()
-	}
+	// 如果有关联的Scheduler，添加其统计信息
+	// if e.scheduler != nil {
+	//     status.SchedulerStats = e.scheduler.GetStatus()
+	// }
 
 	return status
 }
 
-// EngineStatus 引擎状态
-type EngineStatus struct {
-	Running    bool                    `json:"running"`
-	TaskCount  int                     `json:"task_count"`
-	TaskStatus map[string]*TaskStatus  `json:"task_status"`
+// cancelSession 取消同步会话（内部方法）
+func (e *SyncEngine) cancelSession(sessionID string) {
+	if session, exists := e.syncSessions[sessionID]; exists {
+		session.Status = "cancelled"
+		session.EndTime = time.Now()
+		e.metrics.ActiveSessions--
+		delete(e.syncSessions, sessionID)
+	}
+}
+
+// metricsCollector 指标收集器（后台goroutine）
+func (e *SyncEngine) metricsCollector() {
+	ticker := time.NewTicker(30 * time.Second) // 每30秒收集一次指标
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-e.ctx.Done():
+			return
+		case <-ticker.C:
+			// 清理过期的会话数据（可选）
+			e.cleanupExpiredSessions()
+		}
+	}
+}
+
+// cleanupExpiredSessions 清理过期的会话数据
+func (e *SyncEngine) cleanupExpiredSessions() {
+	e.mutex.Lock()
+	defer e.mutex.Unlock()
+
+	now := time.Now()
+	expireThreshold := 24 * time.Hour // 24小时后过期
+
+	for sessionID, session := range e.syncSessions {
+		if session.Status != "running" && now.Sub(session.EndTime) > expireThreshold {
+			delete(e.syncSessions, sessionID)
+			e.logger.Debugf("Cleaned up expired session: %s", sessionID)
+		}
+	}
 }

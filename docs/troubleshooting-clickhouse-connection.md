@@ -262,7 +262,7 @@ go build -o ck2sr main.go
 ```json
 {
   "file": "D:/Claude/ck2sr/pkg/clickhouse/client.go:76",
-  "func": "github.com/ck2sr/ck2sr/pkg/clickhouse.NewClient",
+  "func": "github.com/sunkaimr/ck2sr/pkg/clickhouse.NewClient",
   "level": "info",
   "msg": "Attempting to connect to ClickHouse - Host: localhost, Port: 9000, Database: default, User: default",
   "time": "2025-09-18T17:54:18+08:00"

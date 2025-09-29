@@ -1,4 +1,4 @@
-module github.com/ck2sr/ck2sr
+module github.com/sunkaimr/ck2sr
 
 go 1.25.1
 

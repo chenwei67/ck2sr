@@ -15,8 +15,8 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/sirupsen/logrus"
 
-	"github.com/ck2sr/ck2sr/internal/config"
-	"github.com/ck2sr/ck2sr/internal/logging"
+	"github.com/sunkaimr/ck2sr/internal/config"
+	"github.com/sunkaimr/ck2sr/internal/logging"
 )
 
 // ColumnInfo 表示数据库列信息
@@ -689,7 +689,6 @@ func (g *DataGenerator) generateDate(r *rand.Rand) time.Time {
 
 func (g *DataGenerator) generateDateTime(r *rand.Rand) time.Time {
 	return time.Now()
-	// return time.Now().Add(-time.Duration(r.Intn(365*5)) * 24 * time.Hour)
 }
 
 func (g *DataGenerator) generateJSONValue(col ColumnInfo, id int64, r *rand.Rand) string {
