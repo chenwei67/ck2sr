@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/sunkaimr/ck2sr/pkg/protocol"
 )
 
 type HTTPClient struct {
 	config     *HTTPConfig
 	httpClient *http.Client
+	logger     *logrus.Logger
 	baseURL    string
 }
 
@@ -32,6 +34,7 @@ func NewHTTPClient(config *HTTPConfig) (*HTTPClient, error) {
 	return &HTTPClient{
 		config:     config,
 		httpClient: httpClient,
+		logger:     logrus.New().WithField("component", "StarRocksHTTPClient").Logger,
 		baseURL:    baseURL,
 	}, nil
 }
@@ -55,6 +58,8 @@ type StreamLoadResponse struct {
 }
 
 func (c *HTTPClient) StreamLoad(ctx context.Context, options *StreamLoadOptions, data *bytes.Buffer) (*StreamLoadResponse, error) {
+	c.logger.Infof("[DEBUG] StreamLoad to %s.%s with format %s", options.Database, options.Table, options.Format)
+	// TODO: 参考master分支的 数据写入问题
 	url := fmt.Sprintf("%s/api/%s/%s/_stream_load", c.baseURL, options.Database, options.Table)
 
 	req, err := http.NewRequestWithContext(ctx, "PUT", url, data)

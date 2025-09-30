@@ -257,14 +257,30 @@ func (t *SyncTask) Execute(ctx context.Context) error {
 
 			t.logger.Infof("Starting sync for table: %s", table)
 
-			// 执行表同步
+			// 异步执行表同步
 			if err := syncJob.Start(execCtx); err != nil {
 				t.logger.Errorf("Failed to sync table %s: %v", table, err)
 				t.monitor.SetTableError(table, err)
 				errChan <- fmt.Errorf("table %s: %w", table, err)
-			} else {
-				t.logger.Infof("Successfully completed sync for table: %s", table)
-				errChan <- nil
+			}
+
+			// 轮询获取执行结果
+			ticker := time.NewTicker(5 * time.Second) //TODO: 可配置
+			defer ticker.Stop()
+			for range ticker.C {
+				if execCtx.Err() != nil {
+					t.logger.Warnf("Execution context cancelled for table %s", table)
+					return
+				}
+				progress := syncJob.GetProgress()
+				if progress != nil && progress.Status == "completed" {
+					errChan <- nil
+					t.logger.Infof("Successfully completed sync for table: %s", table)
+					return
+				} else if progress != nil && progress.Status == "failed" {
+					errChan <- fmt.Errorf("table %s sync failed", table)
+					return
+				}
 			}
 		}(tableName, job)
 	}

@@ -201,6 +201,7 @@ func (p *Pipeline) readData(ctx context.Context, table string) error {
 		p.logger.Infof("Starting read from offset: %d", currentOffset)
 	}
 
+	p.logger.Infof("[DEBUG] Reader started for table: %s", table)
 	for {
 		select {
 		case <-ctx.Done():
@@ -240,11 +241,13 @@ func (p *Pipeline) readData(ctx context.Context, table string) error {
 			Table:  table,
 		}
 
+		p.logger.Infof("[DEBUG] Read batch %d with %d records, offset %d", batchCount+1, len(batch), currentOffset)
 		select {
 		case p.dataChan <- dataBatch:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
+		p.logger.Infof("[DEBUG] Send batch %d records to channel success", len(batch))
 
 		batchCount++
 		p.updateBatchCount(1)
@@ -262,16 +265,17 @@ func (p *Pipeline) readData(ctx context.Context, table string) error {
 // writerWorker 并发Writer工作者，处理数据写入
 func (p *Pipeline) writerWorker(ctx context.Context, workerID int) {
 	defer p.wg.Done()
-	p.logger.Debugf("Writer worker %d started", workerID)
+	p.logger.Infof("[DEBUG] Writer worker %d started", workerID)
 
 	for {
 		select {
 		case batch, ok := <-p.dataChan:
 			if !ok {
-				p.logger.Debugf("Writer worker %d: data channel closed", workerID)
+				p.logger.Infof("Writer worker %d: data channel closed", workerID)
 				return
 			}
 
+			p.logger.Infof("[DEBUG] Writer worker %d: processing batch with %d records, offset %d", workerID, len(batch.Data), batch.Offset)
 			// 处理数据批次
 			if err := p.processBatch(ctx, batch, workerID); err != nil {
 				select {

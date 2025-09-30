@@ -14,11 +14,11 @@ import (
 type TaskStatus string
 
 const (
-	TaskStatusPending  TaskStatus = "pending"
-	TaskStatusRunning  TaskStatus = "running"
-	TaskStatusSuccess  TaskStatus = "success"
-	TaskStatusFailed   TaskStatus = "failed"
-	TaskStatusSkipped  TaskStatus = "skipped"
+	TaskStatusPending TaskStatus = "pending"
+	TaskStatusRunning TaskStatus = "running"
+	TaskStatusSuccess TaskStatus = "success"
+	TaskStatusFailed  TaskStatus = "failed"
+	TaskStatusSkipped TaskStatus = "skipped"
 )
 
 type TaskExecutor interface {
@@ -28,14 +28,15 @@ type TaskExecutor interface {
 }
 
 type Scheduler struct {
-	config   *config.PolicyConfig
-	storage  storage.Storage
-	logger   *logrus.Logger
-	tasks    map[string]TaskExecutor
-	running  map[string]context.CancelFunc
-	mu       sync.RWMutex
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
+	config  *config.PolicyConfig
+	storage storage.Storage
+	logger  *logrus.Logger
+	tasks   map[string]TaskExecutor
+	running map[string]context.CancelFunc
+	mu      sync.RWMutex
+	stopCh  chan struct{}
+	wg      sync.WaitGroup
+	once    sync.Once
 }
 
 func NewScheduler(cfg *config.PolicyConfig, store storage.Storage, logger *logrus.Logger) *Scheduler {
@@ -80,6 +81,12 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	s.logger.Info("Scheduler starting...")
 
 	s.wg.Add(1)
+	// 主动调度一次
+	s.once.Do(func() {
+		s.checkAndScheduleTasks(ctx)
+	})
+
+	// 周期性调度
 	go s.schedulerLoop(ctx)
 
 	s.logger.Info("Scheduler started")
@@ -146,6 +153,7 @@ func (s *Scheduler) checkAndScheduleTasks(ctx context.Context) {
 		}
 
 		if !task.GetTaskConfig().Enabled {
+			s.logger.Debugf("Task %s is disabled, skipping", taskID)
 			continue
 		}
 
@@ -173,12 +181,12 @@ func (s *Scheduler) shouldExecuteTask(ctx context.Context, taskID string) bool {
 		}
 	}
 
+	s.logger.Debugf("Task %s not eligible for execution (status: %+v)", taskID, state)
 	return false
 }
 
 func (s *Scheduler) executeTask(ctx context.Context, task TaskExecutor) {
 	taskID := task.GetTaskID()
-
 	s.mu.Lock()
 	if _, isRunning := s.running[taskID]; isRunning {
 		s.mu.Unlock()
