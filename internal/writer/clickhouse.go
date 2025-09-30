@@ -18,35 +18,34 @@ type ClickHouseHTTPWriter struct {
 	ctx    context.Context
 }
 
-func NewClickHouseHTTPWriter(cfg *config.DataSourceConfig) (*ClickHouseHTTPWriter, error) {
-	return &ClickHouseHTTPWriter{
+func NewClickHouseHTTPWriter(cfg *config.DataSourceConfig, cli *clickhouse.HTTPClient) (*ClickHouseHTTPWriter, error) {
+	ret := &ClickHouseHTTPWriter{
 		config: cfg,
 		buffer: make([]interface{}, 0),
 		ctx:    context.Background(),
-	}, nil
+	}
+	ret.SetClient(cli)
+	return ret, nil
 }
 
 func (w *ClickHouseHTTPWriter) SetClient(client *clickhouse.HTTPClient) {
 	w.client = client
 }
 
-func (w *ClickHouseHTTPWriter) SetTable(table string) {
+func (w *ClickHouseHTTPWriter) SetTable(table string) ExecutableWriter {
 	w.table = table
+	return w
 }
 
 // Write 写入一批记录到缓冲区（ClickHouse HTTP Writer）
 // records: 记录切片，每个记录为interface{}类型
-func (w *ClickHouseHTTPWriter) Write(ctx context.Context, records []interface{}) error {
-	w.buffer = append(w.buffer, records...)
+func (w *ClickHouseHTTPWriter) Write(ctx context.Context, records interface{}) error {
+	// todo: 实现ClickHouse HTTP写入逻辑
 	return nil
 }
 
 func (w *ClickHouseHTTPWriter) Flush(ctx context.Context) error {
-	if len(w.buffer) == 0 {
-		return nil
-	}
-
-	w.buffer = w.buffer[:0]
+	// ClickHouse HTTP Writer不需要显式刷新，Writer接口直接发送数据
 	return nil
 }
 
@@ -62,35 +61,34 @@ type ClickHouseMySQLWriter struct {
 	ctx    context.Context
 }
 
-func NewClickHouseMySQLWriter(cfg *config.DataSourceConfig) (*ClickHouseMySQLWriter, error) {
-	return &ClickHouseMySQLWriter{
+func NewClickHouseMySQLWriter(cfg *config.DataSourceConfig, cli *clickhouse.MySQLClient) (*ClickHouseMySQLWriter, error) {
+	ret := &ClickHouseMySQLWriter{
 		config: cfg,
 		buffer: make([]interface{}, 0),
 		ctx:    context.Background(),
-	}, nil
+	}
+	ret.SetClient(cli)
+	return ret, nil
 }
 
 func (w *ClickHouseMySQLWriter) SetClient(client *clickhouse.MySQLClient) {
 	w.client = client
 }
 
-func (w *ClickHouseMySQLWriter) SetTable(table string) {
+func (w *ClickHouseMySQLWriter) SetTable(table string) ExecutableWriter {
 	w.table = table
+	return w
 }
 
 // Write 写入一批记录到缓冲区（ClickHouse MySQL Writer）
 // records: 记录切片，每个记录为interface{}类型
-func (w *ClickHouseMySQLWriter) Write(ctx context.Context, records []interface{}) error {
-	w.buffer = append(w.buffer, records...)
+func (w *ClickHouseMySQLWriter) Write(ctx context.Context, records interface{}) error {
+	// todo: 实现ClickHouse MySQL写入逻辑
 	return nil
 }
 
 func (w *ClickHouseMySQLWriter) Flush(ctx context.Context) error {
-	if len(w.buffer) == 0 {
-		return nil
-	}
-
-	w.buffer = w.buffer[:0]
+	// ClickHouse MySQL Writer不需要显式刷新，Writer接口直接发送数据
 	return nil
 }
 

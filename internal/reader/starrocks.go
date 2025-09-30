@@ -13,26 +13,41 @@ import (
 type StarRocksMySQLReader struct {
 	config *config.DataSourceConfig
 	client *starrocks.MySQLClient
+	query  string
 	rows   *sql.Rows
 	ctx    context.Context
 }
 
-func NewStarRocksMySQLReader(cfg *config.DataSourceConfig) (*StarRocksMySQLReader, error) {
-	return &StarRocksMySQLReader{
+func NewStarRocksMySQLReader(cfg *config.DataSourceConfig, cli *starrocks.MySQLClient) (*StarRocksMySQLReader, error) {
+	ret := &StarRocksMySQLReader{
 		config: cfg,
 		ctx:    context.Background(),
-	}, nil
+	}
+	ret.SetClient(cli)
+
+	return ret, nil
 }
 
-func (r *StarRocksMySQLReader) SetClient(client *starrocks.MySQLClient) {
+func (r *StarRocksMySQLReader) SetClient(client *starrocks.MySQLClient) ExecutableReader {
 	r.client = client
+	return r
 }
 
-func (r *StarRocksMySQLReader) Execute(ctx context.Context, query string) error {
+func (r *StarRocksMySQLReader) SetColumnFilter(excludeColumns []string, fixedValues map[string]interface{}) ExecutableReader {
+	// MySQL Reader暂不支持列过滤
+	return r
+}
+
+func (r *StarRocksMySQLReader) SetQuery(query string) ExecutableReader {
+	r.query = query
+	return r
+}
+
+func (r *StarRocksMySQLReader) Execute(ctx context.Context) error {
 	r.ctx = ctx
-	rows, err := r.client.Query(ctx, query)
+	rows, err := r.client.Query(ctx, r.query)
 	if err != nil {
-		return fmt.Errorf("failed to execute query: %w", err)
+		return fmt.Errorf("failed to execute query(%s): %w", r.query, err)
 	}
 	r.rows = rows
 	return nil
@@ -86,27 +101,41 @@ func (r *StarRocksMySQLReader) Close() error {
 type StarRocksFlightSQLReader struct {
 	config  *config.DataSourceConfig
 	client  *starrocks.FlightSQLClient
+	query   string
 	records []interface{}
 	index   int
 	ctx     context.Context
 }
 
-func NewStarRocksFlightSQLReader(cfg *config.DataSourceConfig) (*StarRocksFlightSQLReader, error) {
-	return &StarRocksFlightSQLReader{
+func NewStarRocksFlightSQLReader(cfg *config.DataSourceConfig, cli *starrocks.FlightSQLClient) (*StarRocksFlightSQLReader, error) {
+	ret := &StarRocksFlightSQLReader{
 		config: cfg,
 		ctx:    context.Background(),
-	}, nil
+	}
+	ret.SetClient(cli)
+	return ret, nil
 }
 
-func (r *StarRocksFlightSQLReader) SetClient(client *starrocks.FlightSQLClient) {
+func (r *StarRocksFlightSQLReader) SetClient(client *starrocks.FlightSQLClient) ExecutableReader {
 	r.client = client
+	return r
 }
 
-func (r *StarRocksFlightSQLReader) Execute(ctx context.Context, query string) error {
+func (r *StarRocksFlightSQLReader) SetColumnFilter(excludeColumns []string, fixedValues map[string]interface{}) ExecutableReader {
+	// FlightSQL Reader暂不支持列过滤
+	return r
+}
+
+func (r *StarRocksFlightSQLReader) SetQuery(query string) ExecutableReader {
+	r.query = query
+	return r
+}
+
+func (r *StarRocksFlightSQLReader) Execute(ctx context.Context) error {
 	r.ctx = ctx
-	records, err := r.client.QueryRecords(ctx, query)
+	records, err := r.client.QueryRecords(ctx, r.query)
 	if err != nil {
-		return fmt.Errorf("failed to execute query: %w", err)
+		return fmt.Errorf("failed to execute query(%s): %w", r.query, err)
 	}
 	r.records = records
 	r.index = 0

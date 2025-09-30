@@ -18,56 +18,50 @@ type StarRocksHTTPWriter struct {
 	ctx    context.Context
 }
 
-func NewStarRocksHTTPWriter(cfg *config.DataSourceConfig) (*StarRocksHTTPWriter, error) {
-	return &StarRocksHTTPWriter{
+func NewStarRocksHTTPWriter(cfg *config.DataSourceConfig, cli *starrocks.HTTPClient) (*StarRocksHTTPWriter, error) {
+	ret := &StarRocksHTTPWriter{
 		config: cfg,
 		buffer: make([]interface{}, 0),
 		ctx:    context.Background(),
-	}, nil
+	}
+	ret.SetClient(cli)
+	return ret, nil
 }
 
 func (w *StarRocksHTTPWriter) SetClient(client *starrocks.HTTPClient) {
 	w.client = client
 }
 
-func (w *StarRocksHTTPWriter) SetTable(table string) {
+func (w *StarRocksHTTPWriter) SetTable(table string) ExecutableWriter {
 	w.table = table
+	return w
 }
 
 // Write 写入一批记录到缓冲区
 // records: 记录切片，每个记录为interface{}类型
-func (w *StarRocksHTTPWriter) Write(ctx context.Context, records []interface{}) error {
-	w.buffer = append(w.buffer, records...)
-	return nil
-}
-
-func (w *StarRocksHTTPWriter) Flush(ctx context.Context) error {
-	if len(w.buffer) == 0 {
-		return nil
-	}
-
-	var buf bytes.Buffer
-	for _, record := range w.buffer {
-		data, err := json.Marshal(record)
-		if err != nil {
-			return fmt.Errorf("failed to marshal record: %w", err)
-		}
-		buf.Write(data)
-		buf.WriteByte('\n')
-	}
-
+func (w *StarRocksHTTPWriter) Write(ctx context.Context, records interface{}) error {
 	options := &starrocks.StreamLoadOptions{
 		Database: w.config.Database,
 		Table:    w.table,
 		Format:   "json",
 	}
 
-	_, err := w.client.StreamLoad(ctx, options, buf.Bytes())
+	data, err := json.Marshal(records)
+	if err != nil {
+		return fmt.Errorf("failed to marshal record: %w", err)
+	}
+
+	buf := bytes.NewBuffer(data)
+	_, err = w.client.StreamLoad(ctx, options, buf)
 	if err != nil {
 		return fmt.Errorf("failed to stream load: %w", err)
 	}
 
-	w.buffer = w.buffer[:0]
+	return nil
+}
+
+func (w *StarRocksHTTPWriter) Flush(ctx context.Context) error {
+	// StarRocks HTTP Writer不需要显式刷新，Writer接口直接发送数据
 	return nil
 }
 
@@ -83,35 +77,34 @@ type StarRocksMySQLWriter struct {
 	ctx    context.Context
 }
 
-func NewStarRocksMySQLWriter(cfg *config.DataSourceConfig) (*StarRocksMySQLWriter, error) {
-	return &StarRocksMySQLWriter{
+func NewStarRocksMySQLWriter(cfg *config.DataSourceConfig, cli *starrocks.MySQLClient) (*StarRocksMySQLWriter, error) {
+	ret := &StarRocksMySQLWriter{
 		config: cfg,
 		buffer: make([]interface{}, 0),
 		ctx:    context.Background(),
-	}, nil
+	}
+	ret.SetClient(cli)
+	return ret, nil
 }
 
 func (w *StarRocksMySQLWriter) SetClient(client *starrocks.MySQLClient) {
 	w.client = client
 }
 
-func (w *StarRocksMySQLWriter) SetTable(table string) {
+func (w *StarRocksMySQLWriter) SetTable(table string) ExecutableWriter {
 	w.table = table
+	return w
 }
 
 // Write 写入一批记录到缓冲区（MySQL Writer）
 // records: 记录切片，每个记录为interface{}类型
-func (w *StarRocksMySQLWriter) Write(ctx context.Context, records []interface{}) error {
-	w.buffer = append(w.buffer, records...)
+func (w *StarRocksMySQLWriter) Write(ctx context.Context, records interface{}) error {
+	// todo: 实现MySQL写入逻辑
 	return nil
 }
 
 func (w *StarRocksMySQLWriter) Flush(ctx context.Context) error {
-	if len(w.buffer) == 0 {
-		return nil
-	}
-
-	w.buffer = w.buffer[:0]
+	// MySQL Writer不需要显式刷新，Writer接口直接发送数据
 	return nil
 }
 

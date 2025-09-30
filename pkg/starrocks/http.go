@@ -37,27 +37,27 @@ func NewHTTPClient(config *HTTPConfig) (*HTTPClient, error) {
 }
 
 type StreamLoadResponse struct {
-	TxnID              int64  `json:"TxnId"`
-	Label              string `json:"Label"`
-	Status             string `json:"Status"`
-	Message            string `json:"Message"`
-	NumberTotalRows    int64  `json:"NumberTotalRows"`
-	NumberLoadedRows   int64  `json:"NumberLoadedRows"`
-	NumberFilteredRows int64  `json:"NumberFilteredRows"`
-	NumberUnselectedRows int64 `json:"NumberUnselectedRows"`
-	LoadBytes          int64  `json:"LoadBytes"`
-	LoadTimeMs         int64  `json:"LoadTimeMs"`
-	BeginTxnTimeMs     int64  `json:"BeginTxnTimeMs"`
-	StreamLoadPutTimeMs int64 `json:"StreamLoadPutTimeMs"`
-	ReadDataTimeMs     int64  `json:"ReadDataTimeMs"`
-	WriteDataTimeMs    int64  `json:"WriteDataTimeMs"`
-	CommitAndPublishTimeMs int64 `json:"CommitAndPublishTimeMs"`
+	TxnID                  int64  `json:"TxnId"`
+	Label                  string `json:"Label"`
+	Status                 string `json:"Status"`
+	Message                string `json:"Message"`
+	NumberTotalRows        int64  `json:"NumberTotalRows"`
+	NumberLoadedRows       int64  `json:"NumberLoadedRows"`
+	NumberFilteredRows     int64  `json:"NumberFilteredRows"`
+	NumberUnselectedRows   int64  `json:"NumberUnselectedRows"`
+	LoadBytes              int64  `json:"LoadBytes"`
+	LoadTimeMs             int64  `json:"LoadTimeMs"`
+	BeginTxnTimeMs         int64  `json:"BeginTxnTimeMs"`
+	StreamLoadPutTimeMs    int64  `json:"StreamLoadPutTimeMs"`
+	ReadDataTimeMs         int64  `json:"ReadDataTimeMs"`
+	WriteDataTimeMs        int64  `json:"WriteDataTimeMs"`
+	CommitAndPublishTimeMs int64  `json:"CommitAndPublishTimeMs"`
 }
 
-func (c *HTTPClient) StreamLoad(ctx context.Context, options *StreamLoadOptions, data []byte) (*StreamLoadResponse, error) {
+func (c *HTTPClient) StreamLoad(ctx context.Context, options *StreamLoadOptions, data *bytes.Buffer) (*StreamLoadResponse, error) {
 	url := fmt.Sprintf("%s/api/%s/%s/_stream_load", c.baseURL, options.Database, options.Table)
 
-	req, err := http.NewRequestWithContext(ctx, "PUT", url, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "PUT", url, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -127,7 +127,7 @@ func (c *HTTPClient) StreamLoadRecords(ctx context.Context, options *StreamLoadO
 		return nil, fmt.Errorf("unsupported format: %s", options.Format)
 	}
 
-	return c.StreamLoad(ctx, options, data)
+	return c.StreamLoad(ctx, options, bytes.NewBuffer(data))
 }
 
 // StreamLoadBatch 批量写入记录

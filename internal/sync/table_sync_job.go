@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"github.com/sunkaimr/ck2sr/internal/client"
 	"github.com/sunkaimr/ck2sr/internal/config"
 	"github.com/sunkaimr/ck2sr/internal/storage"
 )
@@ -43,38 +44,47 @@ type TableSyncProgress struct {
 
 // TableSyncStats 表同步统计
 type TableSyncStats struct {
-	TableName     string        `json:"table_name"`
-	StartTime     time.Time     `json:"start_time"`
-	EndTime       time.Time     `json:"end_time"`
-	Duration      time.Duration `json:"duration"`
-	ProcessedRows int64         `json:"processed_rows"`
-	ProcessedBytes int64        `json:"processed_bytes"`
-	ErrorCount    int64         `json:"error_count"`
-	Status        string        `json:"status"`
+	TableName      string        `json:"table_name"`
+	StartTime      time.Time     `json:"start_time"`
+	EndTime        time.Time     `json:"end_time"`
+	Duration       time.Duration `json:"duration"`
+	ProcessedRows  int64         `json:"processed_rows"`
+	ProcessedBytes int64         `json:"processed_bytes"`
+	ErrorCount     int64         `json:"error_count"`
+	Status         string        `json:"status"`
 }
 
 // DefaultTableSyncJob 默认的表同步作业实现
 type DefaultTableSyncJob struct {
-	taskID      string                    // 所属任务ID
-	tableName   string                    // 表名
-	config      *config.SyncTaskConfig    // 任务配置
-	policy      *config.PolicyConfig      // 策略配置
-	storage     storage.Storage           // 存储接口
-	logger      *logrus.Logger           // 日志记录器
-	pipeline    *Pipeline                // 数据管道
-	progress    *TableSyncProgress       // 同步进度
-	stats       *TableSyncStats          // 统计信息
-	mu          sync.RWMutex             // 读写锁
-	ctx         context.Context          // 上下文
-	cancel      context.CancelFunc       // 取消函数
+	taskID    string                   // 所属任务ID
+	tableName string                   // 表名，源表
+	dstTable  string                   // 目标表名
+	config    *config.SyncTaskConfig   // 任务配置
+	policy    *config.PolicyConfig     // 策略配置
+	ckCliMgr  *client.ClickHouseCliMgr // ClickHouse客户端管理器
+	srCliMgr  *client.StarRocksCliMgr  // StarRocks客户端管理器
+	storage   storage.Storage          // 存储接口
+	logger    *logrus.Logger           // 日志记录器
+	pipeline  *Pipeline                // 数据管道
+	progress  *TableSyncProgress       // 同步进度
+	stats     *TableSyncStats          // 统计信息
+	mu        sync.RWMutex             // 读写锁
+	ctx       context.Context          // 上下文
+	cancel    context.CancelFunc       // 取消函数
 }
 
 // NewTableSyncJob 创建新的表同步作业
-func NewTableSyncJob(taskID, tableName string, taskConfig *config.SyncTaskConfig, policy *config.PolicyConfig, store storage.Storage, logger *logrus.Logger) TableSyncJob {
+func NewTableSyncJob(taskID, tableName string, dstTable string,
+	taskConfig *config.SyncTaskConfig,
+	policy *config.PolicyConfig,
+	ckCliMgr *client.ClickHouseCliMgr,
+	srCliMgr *client.StarRocksCliMgr,
+	store storage.Storage,
+	logger *logrus.Logger) TableSyncJob {
 	// 为该表创建专用的日志记录器
 	tableLogger := logger.WithFields(logrus.Fields{
 		"task_id": taskID,
-		"table": tableName,
+		"table":   tableName,
 	}).Logger
 
 	job := &DefaultTableSyncJob{
@@ -82,25 +92,27 @@ func NewTableSyncJob(taskID, tableName string, taskConfig *config.SyncTaskConfig
 		tableName: tableName,
 		config:    taskConfig,
 		policy:    policy,
+		ckCliMgr:  ckCliMgr,
+		srCliMgr:  srCliMgr,
 		storage:   store,
 		logger:    tableLogger,
 		progress: &TableSyncProgress{
-			TaskID:       taskID,
-			TableName:    tableName,
-			Offset:       0,
-			TotalRows:    0,
+			TaskID:        taskID,
+			TableName:     tableName,
+			Offset:        0,
+			TotalRows:     0,
 			ProcessedRows: 0,
-			LastSyncTime: time.Time{},
-			Status:       "pending",
+			LastSyncTime:  time.Time{},
+			Status:        "pending",
 		},
 		stats: &TableSyncStats{
-			TableName:     tableName,
-			StartTime:     time.Time{},
-			EndTime:       time.Time{},
-			ProcessedRows: 0,
+			TableName:      tableName,
+			StartTime:      time.Time{},
+			EndTime:        time.Time{},
+			ProcessedRows:  0,
 			ProcessedBytes: 0,
-			ErrorCount:    0,
-			Status:        "pending",
+			ErrorCount:     0,
+			Status:         "pending",
 		},
 	}
 
@@ -137,8 +149,8 @@ func (j *DefaultTableSyncJob) Start(ctx context.Context) error {
 	}
 
 	// 创建数据管道
-	j.pipeline = NewPipeline(j.config, j.policy, j.logger)
-	if err := j.pipeline.Initialize(j.ctx); err != nil {
+	j.pipeline = NewPipeline(j.config, j.policy, j.ckCliMgr, j.srCliMgr, j.tableName, j.dstTable, j.logger)
+	if err := j.pipeline.Initialize(j.ctx, j.progress.Offset); err != nil {
 		return fmt.Errorf("failed to initialize pipeline for table %s: %w", j.tableName, err)
 	}
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"github.com/sunkaimr/ck2sr/internal/client"
 	"github.com/sunkaimr/ck2sr/internal/config"
 	"github.com/sunkaimr/ck2sr/internal/scheduler"
 	"github.com/sunkaimr/ck2sr/internal/storage"
@@ -33,6 +34,10 @@ type SyncTask struct {
 	monitor *Monitor
 	status  TaskStatus
 
+	// 客户端
+	ckCliMgr *client.ClickHouseCliMgr
+	srCliMgr *client.StarRocksCliMgr
+
 	// jobs 管理多个表的同步作业，key为表名
 	jobs   map[string]TableSyncJob
 	jobsMu sync.RWMutex
@@ -44,25 +49,32 @@ type SyncTask struct {
 }
 
 // NewSyncTask 创建新的同步任务
-func NewSyncTask(cfg *config.SyncTaskConfig, policy *config.PolicyConfig, store storage.Storage, logger *logrus.Logger) *SyncTask {
+func NewSyncTask(cfg *config.SyncTaskConfig,
+	policy *config.PolicyConfig,
+	store storage.Storage,
+	ckCliMgr *client.ClickHouseCliMgr,
+	srCliMgr *client.StarRocksCliMgr,
+	logger *logrus.Logger) (*SyncTask, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	task := &SyncTask{
-		config:  cfg,
-		policy:  policy,
-		storage: store,
-		logger:  logger,
-		monitor: NewMonitor(cfg.TaskID, logger),
-		status:  TaskStatusIdle,
-		jobs:    make(map[string]TableSyncJob),
-		ctx:     ctx,
-		cancel:  cancel,
+		config:   cfg,
+		policy:   policy,
+		storage:  store,
+		ckCliMgr: ckCliMgr,
+		srCliMgr: srCliMgr,
+		logger:   logger,
+		monitor:  NewMonitor(cfg.TaskID, logger),
+		status:   TaskStatusIdle,
+		jobs:     make(map[string]TableSyncJob),
+		ctx:      ctx,
+		cancel:   cancel,
 	}
 
 	// 为每个表创建TableSyncJob
 	task.initializeTableJobs()
 
-	return task
+	return task, nil
 }
 
 // initializeTableJobs 初始化表同步作业
@@ -70,10 +82,13 @@ func (t *SyncTask) initializeTableJobs() {
 	t.jobsMu.Lock()
 	defer t.jobsMu.Unlock()
 
-	for _, tableName := range t.config.Reader.Tables {
-		job := NewTableSyncJob(t.config.TaskID, tableName, t.config, t.policy, t.storage, t.logger)
-		t.jobs[tableName] = job
-		t.logger.Infof("Created TableSyncJob for table: %s", tableName)
+	// 确保Reader和Writer的表数量一致
+	for i, tableName := range t.config.Reader.Tables {
+		srcTable := tableName
+		dstTable := t.config.Writer.Tables[i] // 目标表名与源表名一一对应
+		job := NewTableSyncJob(t.config.TaskID, srcTable, dstTable, t.config, t.policy, t.ckCliMgr, t.srCliMgr, t.storage, t.logger)
+		t.jobs[srcTable] = job
+		t.logger.Infof("Created TableSyncJob from table(%s) to table(%s)", srcTable, dstTable)
 	}
 }
 

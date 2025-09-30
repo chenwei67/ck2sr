@@ -27,7 +27,8 @@
       "Bash(./dtool:*)",
       "Bash(del engine.go)",
       "Bash(ren:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(git rm:*)"
     ],
     "deny": [],
     "ask": []

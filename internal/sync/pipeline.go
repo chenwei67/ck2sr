@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"github.com/sunkaimr/ck2sr/internal/client"
 	"github.com/sunkaimr/ck2sr/internal/config"
 	"github.com/sunkaimr/ck2sr/internal/reader"
 	"github.com/sunkaimr/ck2sr/internal/storage"
@@ -17,24 +18,28 @@ import (
 // Pipeline 异步数据处理管道
 // 支持Channel-based数据流、Writer并发和Offset持久化
 type Pipeline struct {
-	config  *config.SyncTaskConfig
-	policy  *config.PolicyConfig
-	logger  *logrus.Logger
-	reader  protocol.DataReader
-	writer  protocol.DataWriter
-	monitor *Monitor
-	storage storage.Storage
+	config      *config.SyncTaskConfig
+	policy      *config.PolicyConfig
+	logger      *logrus.Logger
+	srcTable    string
+	dstTable    string
+	reader      reader.ExecutableReader
+	writer      writer.ExecutableWriter
+	monitor     *Monitor
+	storage     storage.Storage
+	ckClientMgr *client.ClickHouseCliMgr
+	srClientMgr *client.StarRocksCliMgr
 
 	// 异步处理相关
-	dataChan    chan DataBatch    // 数据批次通道
-	errorChan   chan error        // 错误通道
+	dataChan     chan DataBatch    // 数据批次通道
+	errorChan    chan error        // 错误通道
 	progressChan chan ProgressInfo // 进度通道
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
 
 	// 统计信息
-	stats       *PipelineStats
-	statsMu     sync.RWMutex
+	stats   *PipelineStats
+	statsMu sync.RWMutex
 }
 
 // DataBatch 数据批次结构
@@ -46,19 +51,29 @@ type DataBatch struct {
 
 // ProgressInfo 进度信息
 type ProgressInfo struct {
-	Table       string
-	Offset      int64
+	Table         string
+	Offset        int64
 	ProcessedRows int64
-	BatchCount  int
+	BatchCount    int
 }
 
 // NewPipeline 创建新的异步Pipeline
-func NewPipeline(cfg *config.SyncTaskConfig, policy *config.PolicyConfig, logger *logrus.Logger) *Pipeline {
+func NewPipeline(cfg *config.SyncTaskConfig,
+	policy *config.PolicyConfig,
+	ckCliMgr *client.ClickHouseCliMgr,
+	srCliMgr *client.StarRocksCliMgr,
+	srcTable string,
+	dstTable string,
+	logger *logrus.Logger) *Pipeline {
 	return &Pipeline{
-		config:  cfg,
-		policy:  policy,
-		logger:  logger,
-		monitor: NewMonitor(cfg.TaskID, logger),
+		config:      cfg,
+		policy:      policy,
+		ckClientMgr: ckCliMgr,
+		srClientMgr: srCliMgr,
+		srcTable:    srcTable,
+		dstTable:    dstTable,
+		logger:      logger,
+		monitor:     NewMonitor(cfg.TaskID, logger),
 		stats: &PipelineStats{
 			StartTime: time.Now(),
 		},
@@ -75,19 +90,46 @@ func (p *Pipeline) SetStorage(storage storage.Storage) {
 }
 
 // Initialize 初始化Pipeline组件
-func (p *Pipeline) Initialize(ctx context.Context) error {
+func (p *Pipeline) Initialize(ctx context.Context, offset int64) error {
 	readerFactory := reader.NewReaderFactory()
 	writerFactory := writer.NewWriterFactory()
 
 	var err error
-	p.reader, err = readerFactory.Create(&p.config.Reader)
+	p.reader, err = readerFactory.CreateExecutable(&p.config.Reader, p.ckClientMgr, p.srClientMgr)
 	if err != nil {
 		return fmt.Errorf("failed to create reader: %w", err)
 	}
 
-	p.writer, err = writerFactory.Create(&p.config.Writer)
+	p.writer, err = writerFactory.Create(&p.config.Writer, p.ckClientMgr, p.srClientMgr)
 	if err != nil {
 		return fmt.Errorf("failed to create writer: %w", err)
+	}
+	p.writer.SetTable(p.dstTable)
+
+	// 设置查询条件，并执行查询命令
+	query := fmt.Sprintf("SELECT * FROM %s.%s", p.config.Reader.Database, p.srcTable)
+	if p.config.Settings.DataRange.TimeColumn != "" {
+		if p.config.Settings.DataRange.StartTime != "" {
+			query += fmt.Sprintf(" WHERE %s >= '%s'", p.config.Settings.DataRange.TimeColumn, p.config.Settings.DataRange.StartTime)
+		}
+
+		if p.config.Settings.DataRange.EndTime != "" {
+			if p.config.Settings.DataRange.StartTime != "" {
+				query += fmt.Sprintf(" AND %s < '%s'", p.config.Settings.DataRange.TimeColumn, p.config.Settings.DataRange.EndTime)
+			} else {
+				query += fmt.Sprintf(" WHERE %s < '%s'", p.config.Settings.DataRange.TimeColumn, p.config.Settings.DataRange.EndTime)
+			}
+		}
+		// 存在任何一个时间范围条件时，追加ORDER BY
+		query += fmt.Sprintf(" ORDER BY %s", p.config.Settings.DataRange.TimeColumn)
+	}
+	if offset > 0 {
+		query += fmt.Sprintf(" OFFSET %d", offset)
+	}
+
+	if err := p.reader.SetColumnFilter(p.policy.Filter.ExcludeColumns, p.policy.Filter.FixedValues).
+		SetQuery(query).Execute(ctx); err != nil {
+		return fmt.Errorf("failed to execute reader query: %w", err)
 	}
 
 	p.logger.Infof("Pipeline initialized with %d writer concurrency", p.policy.Transfer.WriterConcurrency)
@@ -242,10 +284,10 @@ func (p *Pipeline) writerWorker(ctx context.Context, workerID int) {
 
 			// 发送进度更新
 			progress := ProgressInfo{
-				Table:       batch.Table,
-				Offset:      batch.Offset,
+				Table:         batch.Table,
+				Offset:        batch.Offset,
 				ProcessedRows: int64(len(batch.Data)),
-				BatchCount:  1,
+				BatchCount:    1,
 			}
 
 			select {
@@ -349,12 +391,12 @@ func (p *Pipeline) GetStats() *PipelineStats {
 	stats := p.getStats() // 使用内部方法获取统计
 	// 与监控器数据合并
 	return &PipelineStats{
-		TablesProcessed: p.monitor.GetProcessedTables(),
-		TotalRows:       stats.TotalRows,
-		TotalBytes:      p.monitor.GetTotalBytes(),
-		StartTime:       stats.StartTime,
-		EndTime:         stats.EndTime,
-		BatchCount:      stats.BatchCount,
+		TablesProcessed:   p.monitor.GetProcessedTables(),
+		TotalRows:         stats.TotalRows,
+		TotalBytes:        p.monitor.GetTotalBytes(),
+		StartTime:         stats.StartTime,
+		EndTime:           stats.EndTime,
+		BatchCount:        stats.BatchCount,
 		WriterConcurrency: p.policy.Transfer.WriterConcurrency,
 	}
 }

@@ -7,16 +7,19 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/sirupsen/logrus"
 )
 
 // FileStorage 文件存储实现
 type FileStorage struct {
 	storagePath string
+	logger      *logrus.Logger
 	mu          sync.RWMutex
 }
 
 // NewFileStorage 创建文件存储
-func NewFileStorage(storagePath string) (*FileStorage, error) {
+func NewFileStorage(storagePath string, logger *logrus.Logger) (*FileStorage, error) {
 	// 确保存储目录存在
 	if err := os.MkdirAll(storagePath, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create storage directory: %w", err)
@@ -24,6 +27,7 @@ func NewFileStorage(storagePath string) (*FileStorage, error) {
 
 	return &FileStorage{
 		storagePath: storagePath,
+		logger:      logger,
 	}, nil
 }
 
