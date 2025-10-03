@@ -90,6 +90,7 @@ func NewTableSyncJob(taskID, tableName string, dstTable string,
 	job := &DefaultTableSyncJob{
 		taskID:    taskID,
 		tableName: tableName,
+		dstTable:  dstTable,
 		config:    taskConfig,
 		policy:    policy,
 		ckCliMgr:  ckCliMgr,

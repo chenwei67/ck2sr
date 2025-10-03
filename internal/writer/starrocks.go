@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/sirupsen/logrus"
 	"github.com/sunkaimr/ck2sr/internal/config"
 	"github.com/sunkaimr/ck2sr/pkg/starrocks"
 )
@@ -13,6 +14,7 @@ import (
 type StarRocksHTTPWriter struct {
 	config *config.DataSourceConfig
 	client *starrocks.HTTPClient
+	logger *logrus.Logger
 	buffer []interface{}
 	table  string
 	ctx    context.Context
@@ -21,6 +23,7 @@ type StarRocksHTTPWriter struct {
 func NewStarRocksHTTPWriter(cfg *config.DataSourceConfig, cli *starrocks.HTTPClient) (*StarRocksHTTPWriter, error) {
 	ret := &StarRocksHTTPWriter{
 		config: cfg,
+		logger: logrus.New().WithField("writer", "starrocks_http").Logger,
 		buffer: make([]interface{}, 0),
 		ctx:    context.Background(),
 	}
@@ -50,6 +53,9 @@ func (w *StarRocksHTTPWriter) Write(ctx context.Context, records interface{}) er
 	if err != nil {
 		return fmt.Errorf("failed to marshal record: %w", err)
 	}
+
+	// 打印HTTP请求body数据用于调试
+	w.logger.Debugf("Put Data: %s", string(data))
 
 	buf := bytes.NewBuffer(data)
 	_, err = w.client.StreamLoad(ctx, options, buf)

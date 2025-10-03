@@ -27,7 +27,18 @@ func NewHTTPClient(config *HTTPConfig) (*HTTPClient, error) {
 	httpClient := &http.Client{
 		Timeout: config.Timeout,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			MaxIdleConns:        5,                // 全局最大空闲连接
+			MaxIdleConnsPerHost: 10,               // 单主机最大空闲连接（关键！）
+			MaxConnsPerHost:     50,               // 单主机最大总连接
+			IdleConnTimeout:     60 * time.Second, // 空闲超时
+			// 其他优化参数
+			TLSHandshakeTimeout: 10 * time.Second,
+			TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+		},
+		// 解决starRocks的FE重定向到BE时认证丢失问题
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			SetStarRocksStreamLoadHeaders(req, config.Username, config.Password)
+			return nil // 返回 nil 表示信任所有重定向
 		},
 	}
 
@@ -57,9 +68,20 @@ type StreamLoadResponse struct {
 	CommitAndPublishTimeMs int64  `json:"CommitAndPublishTimeMs"`
 }
 
+func SetStarRocksStreamLoadHeaders(req *http.Request, username, password string) {
+	req.Header.Set("Expect", "100-continue")
+	req.Header.Set("format", "json")
+	req.Header.Set("strip_outer_array", "true") // 剥离JSON数组的外层数组包装
+	req.Header.Set("ignore_json_size", "true")
+	req.Header.Set("fuzzy_parse", "true") // 启用模糊解析以提高容错性
+	// 移除可能导致冲突的头部设置
+	req.Header.Set("compress_type", "lz4_frame") // 暂时禁用压缩避免问题
+	req.Header.Set("num_as_string", "true")      // 移除强制数字为字符串，让StarRocks自动推断类型
+	// 设置认证
+	req.SetBasicAuth(username, password)
+}
+
 func (c *HTTPClient) StreamLoad(ctx context.Context, options *StreamLoadOptions, data *bytes.Buffer) (*StreamLoadResponse, error) {
-	c.logger.Infof("[DEBUG] StreamLoad to %s.%s with format %s", options.Database, options.Table, options.Format)
-	// TODO: 参考master分支的 数据写入问题
 	url := fmt.Sprintf("%s/api/%s/%s/_stream_load", c.baseURL, options.Database, options.Table)
 
 	req, err := http.NewRequestWithContext(ctx, "PUT", url, data)
@@ -67,9 +89,8 @@ func (c *HTTPClient) StreamLoad(ctx context.Context, options *StreamLoadOptions,
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	req.SetBasicAuth(c.config.Username, c.config.Password)
-	req.Header.Set("Expect", "100-continue")
-	req.Header.Set("format", options.Format)
+	// 设置必要的头部
+	SetStarRocksStreamLoadHeaders(req, c.config.Username, c.config.Password)
 
 	if options.Label != "" {
 		req.Header.Set("label", options.Label)
@@ -103,6 +124,7 @@ func (c *HTTPClient) StreamLoad(ctx context.Context, options *StreamLoadOptions,
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
+	c.logger.Debugf("Stream load response: %+v", loadResp)
 	if loadResp.Status != "Success" && loadResp.Status != "Publish Timeout" {
 		return &loadResp, fmt.Errorf("stream load failed: %s - %s", loadResp.Status, loadResp.Message)
 	}
