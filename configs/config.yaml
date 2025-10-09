@@ -85,7 +85,8 @@ sync_tasks:
       column_mapping:          # 全局列映射
         user_id: "id"
         create_time: "created_at"
-      batch_size: 10000        # 批处理大小
+      batch_size: 10000        # 批处理大小（按条数攒批）
+      batch_bytes: 0           # 批处理大小（按数据字节数攒批，0表示不启用）例如：314572800 表示300MB
       batch_interval: "5s"     # 批次间隔时间
       parallel_tables: 2       # 并行处理表的数量
 
@@ -93,7 +94,8 @@ sync_tasks:
 policy:
   # 数据传输策略
   transfer:
-    batch_size: 10000                # 批次大小
+    batch_size: 10000                # 批次大小（按条数攒批，全局默认）
+    batch_bytes: 0                   # 批次大小（按数据字节数攒批，0表示不启用）例如：314572800 表示300MB
     batch_interval: "5s"             # 批次间隔时间
     progress_report_every: 10        # 每N批次输出进度
     progress_report_timeout: "10s"   # 或超过N秒强制输出进度

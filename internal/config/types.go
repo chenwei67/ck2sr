@@ -95,8 +95,9 @@ type SyncSettingsConfig struct {
 	Retry                 RetryConfig                  `yaml:"retry"`
 	ColumnMapping         map[string]string            `yaml:"column_mapping"`
 	TableSpecificSettings map[string]TableSpecificConfig `yaml:"table_specific_settings"`
-	BatchSize             int                          `yaml:"batch_size"`
-	BatchInterval         time.Duration                `yaml:"batch_interval"` // 新增：批次间隔时间
+	BatchSize             int                          `yaml:"batch_size"`       // 按条数攒批
+	BatchBytes            int64                        `yaml:"batch_bytes"`      // 按数据大小攒批（字节数）
+	BatchInterval         time.Duration                `yaml:"batch_interval"`   // 新增：批次间隔时间
 	CSVFormat             CSVFormatConfig              `yaml:"csv_format"`
 	ParallelTables        int                          `yaml:"parallel_tables"`
 }

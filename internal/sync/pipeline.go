@@ -13,6 +13,7 @@ import (
 	"github.com/sunkaimr/ck2sr/internal/storage"
 	"github.com/sunkaimr/ck2sr/internal/writer"
 	"github.com/sunkaimr/ck2sr/pkg/protocol"
+	"github.com/sunkaimr/ck2sr/pkg/utils"
 )
 
 // Pipeline 异步数据处理管道
@@ -100,7 +101,7 @@ func (p *Pipeline) Initialize(ctx context.Context, offset int64) error {
 		return fmt.Errorf("failed to create reader: %w", err)
 	}
 
-	p.writer, err = writerFactory.Create(&p.config.Writer, p.ckClientMgr, p.srClientMgr)
+	p.writer, err = writerFactory.Create(&p.config.Writer, p.ckClientMgr, p.srClientMgr, p.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create writer: %w", err)
 	}
@@ -191,6 +192,7 @@ func (p *Pipeline) Process(ctx context.Context, table string) error {
 }
 
 // readData 主读取循环，负责从数据源读取数据并发送到channel
+// 支持按条数和按字节数两种攒批策略
 func (p *Pipeline) readData(ctx context.Context, table string) error {
 	batchCount := 0
 	currentOffset := int64(0)
@@ -199,6 +201,31 @@ func (p *Pipeline) readData(ctx context.Context, table string) error {
 	if offsetReader, ok := p.reader.(protocol.OffsetReader); ok {
 		currentOffset = offsetReader.GetOffset()
 		p.logger.Infof("Starting read from offset: %d", currentOffset)
+	}
+
+	// 获取攒批配置：优先使用任务级配置，否则使用全局策略配置
+	batchSize := p.config.Settings.BatchSize
+	if batchSize == 0 {
+		batchSize = p.policy.Transfer.BatchSize
+	}
+	batchBytes := p.config.Settings.BatchBytes
+	if batchBytes == 0 {
+		batchBytes = p.policy.Transfer.BatchBytes
+	}
+
+	// 如果两个配置都为0，使用默认条数1000
+	if batchSize == 0 && batchBytes == 0 {
+		batchSize = 1000
+		p.logger.Infof("Using default batch size: %d (both batch_size and batch_bytes are not configured)", batchSize)
+	}
+
+	// 输出攒批策略日志
+	if batchSize > 0 && batchBytes > 0 {
+		p.logger.Infof("Batch strategy: rows=%d OR bytes=%s (whichever comes first)", batchSize, utils.FormatBytes(batchBytes))
+	} else if batchSize > 0 {
+		p.logger.Infof("Batch strategy: rows=%d", batchSize)
+	} else {
+		p.logger.Infof("Batch strategy: bytes=%s", utils.FormatBytes(batchBytes))
 	}
 
 	p.logger.Debugf("Reader started for table: %s", table)
@@ -214,14 +241,70 @@ func (p *Pipeline) readData(ctx context.Context, table string) error {
 			break
 		}
 
-		// 构建数据批次
-		batch := make([]interface{}, 0, p.config.Settings.BatchSize)
-		for i := 0; i < p.config.Settings.BatchSize; i++ {
+		// 构建数据批次，使用动态攒批策略
+		batch := make([]interface{}, 0, batchSize)
+		currentBatchBytes := int64(0)
+
+		for {
+			// 获取当前记录
 			record, err := p.reader.GetRecord()
 			if err != nil {
 				return fmt.Errorf("failed to get record: %w", err)
 			}
+
+			// 计算记录大小（仅在启用字节数限制时）
+			var recordSize int64
+			if batchBytes > 0 {
+				recordSize, err = utils.CalculateRecordSize(record)
+				if err != nil {
+					p.logger.Warnf("Failed to calculate record size, using 0: %v", err)
+					recordSize = 0
+				}
+			}
+
+			// 检查是否达到批次限制（在添加记录之前检查）
+			// 规则：如果添加当前记录会超过阈值，则先发送之前的批次
+			shouldSendBatch := false
+			if batchSize > 0 && batchBytes > 0 {
+				// 双重策略：任一条件满足即发送（但至少要有一条记录）
+				if len(batch) > 0 && (len(batch) >= batchSize || currentBatchBytes+recordSize > batchBytes) {
+					shouldSendBatch = true
+				}
+			} else if batchSize > 0 {
+				// 仅条数策略
+				if len(batch) >= batchSize {
+					shouldSendBatch = true
+				}
+			} else if batchBytes > 0 {
+				// 仅字节数策略（至少要有一条记录）
+				if len(batch) > 0 && currentBatchBytes+recordSize > batchBytes {
+					shouldSendBatch = true
+				}
+			}
+
+			// 如果需要发送批次，先发送已有数据，当前记录放入下一批
+			if shouldSendBatch {
+				// 发送当前批次
+				if err := p.sendBatch(ctx, batch, currentOffset, table); err != nil {
+					return err
+				}
+
+				batchCount++
+				p.updateBatchCount(1)
+
+				// 限速控制
+				if p.policy.Transfer.RateLimitSleep > 0 {
+					time.Sleep(p.policy.Transfer.RateLimitSleep)
+				}
+
+				// 重置批次
+				batch = make([]interface{}, 0, batchSize)
+				currentBatchBytes = 0
+			}
+
+			// 添加当前记录到批次
 			batch = append(batch, record)
+			currentBatchBytes += recordSize
 			currentOffset++
 
 			// 检查是否还有更多数据
@@ -230,34 +313,42 @@ func (p *Pipeline) readData(ctx context.Context, table string) error {
 			}
 		}
 
-		if len(batch) == 0 {
-			break
+		// 发送最后一批数据
+		if len(batch) > 0 {
+			if err := p.sendBatch(ctx, batch, currentOffset, table); err != nil {
+				return err
+			}
+
+			batchCount++
+			p.updateBatchCount(1)
 		}
 
-		// 发送数据批次到channel
-		dataBatch := DataBatch{
-			Data:   batch,
-			Offset: currentOffset,
-			Table:  table,
-		}
-
-		select {
-		case p.dataChan <- dataBatch:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-
-		batchCount++
-		p.updateBatchCount(1)
-
-		// 限速控制
-		if p.policy.Transfer.RateLimitSleep > 0 {
-			time.Sleep(p.policy.Transfer.RateLimitSleep)
-		}
+		// 没有更多数据，退出循环
+		break
 	}
 
 	p.logger.Infof("Read completed: %d batches read", batchCount)
 	return nil
+}
+
+// sendBatch 发送数据批次到channel
+func (p *Pipeline) sendBatch(ctx context.Context, batch []interface{}, offset int64, table string) error {
+	if len(batch) == 0 {
+		return nil
+	}
+
+	dataBatch := DataBatch{
+		Data:   batch,
+		Offset: offset,
+		Table:  table,
+	}
+
+	select {
+	case p.dataChan <- dataBatch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // writerWorker 并发Writer工作者，处理数据写入

@@ -15,12 +15,13 @@ type PolicyConfig struct {
 
 // TransferPolicyConfig 传输策略配置
 type TransferPolicyConfig struct {
-	BatchSize             int           `yaml:"batch_size"`
+	BatchSize             int           `yaml:"batch_size"`               // 按条数攒批（全局默认）
+	BatchBytes            int64         `yaml:"batch_bytes"`              // 按数据大小攒批（字节数，全局默认）
 	BatchInterval         time.Duration `yaml:"batch_interval"`
 	ProgressReportEvery   int           `yaml:"progress_report_every"`
 	ProgressReportTimeout time.Duration `yaml:"progress_report_timeout"`
 	RateLimitSleep        time.Duration `yaml:"rate_limit_sleep"`
-	WriterConcurrency     int           `yaml:"writer_concurrency"`     // 新增：Writer并发数量
+	WriterConcurrency     int           `yaml:"writer_concurrency"`       // 新增：Writer并发数量
 }
 
 // SchedulePolicyConfig 调度策略配置
@@ -58,6 +59,7 @@ func DefaultPolicyConfig() *PolicyConfig {
 	return &PolicyConfig{
 		Transfer: TransferPolicyConfig{
 			BatchSize:             10000,
+			BatchBytes:            0,              // 默认不启用字节数限制
 			BatchInterval:         5 * time.Second,
 			ProgressReportEvery:   10,
 			ProgressReportTimeout: 10 * time.Second,
