@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/sirupsen/logrus"
 	"github.com/sunkaimr/ck2sr/pkg/protocol"
 )
 
@@ -14,7 +15,7 @@ type Client struct {
 	http      *HTTPClient
 }
 
-func NewClient(config *Config) (*Client, error) {
+func NewClient(config *Config, logger *logrus.Logger) (*Client, error) {
 	client := &Client{
 		config: config,
 	}
@@ -40,7 +41,7 @@ func NewClient(config *Config) (*Client, error) {
 	}
 
 	if config.HTTP != nil {
-		client.http, err = NewHTTPClient(config.HTTP)
+		client.http, err = NewHTTPClient(config.HTTP, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create http client: %w", err)
 		}

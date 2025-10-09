@@ -21,7 +21,7 @@ type HTTPClient struct {
 	baseURL    string
 }
 
-func NewHTTPClient(config *HTTPConfig) (*HTTPClient, error) {
+func NewHTTPClient(config *HTTPConfig, logger *logrus.Logger) (*HTTPClient, error) {
 	baseURL := fmt.Sprintf("http://%s:%d", config.Host, config.Port)
 
 	httpClient := &http.Client{
@@ -45,7 +45,7 @@ func NewHTTPClient(config *HTTPConfig) (*HTTPClient, error) {
 	return &HTTPClient{
 		config:     config,
 		httpClient: httpClient,
-		logger:     logrus.New().WithField("component", "StarRocksHTTPClient").Logger,
+		logger:     logger,
 		baseURL:    baseURL,
 	}, nil
 }
@@ -104,6 +104,7 @@ func (c *HTTPClient) StreamLoad(ctx context.Context, options *StreamLoadOptions,
 		req.Header.Set(k, v)
 	}
 
+	c.logger.Debugf("StreamLoad request send : %+v", req.Header)
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute stream load: %w", err)
@@ -124,7 +125,7 @@ func (c *HTTPClient) StreamLoad(ctx context.Context, options *StreamLoadOptions,
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	c.logger.Debugf("Stream load response: %+v", loadResp)
+	c.logger.Infof("Stream load response: %+v", loadResp)
 	if loadResp.Status != "Success" && loadResp.Status != "Publish Timeout" {
 		return &loadResp, fmt.Errorf("stream load failed: %s - %s", loadResp.Status, loadResp.Message)
 	}

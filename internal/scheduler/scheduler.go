@@ -139,7 +139,6 @@ func (s *Scheduler) checkAndScheduleTasks(ctx context.Context) {
 	s.mu.RUnlock()
 
 	if runningCount >= s.config.Schedule.MaxConcurrentTask {
-		s.logger.Debugf("Max concurrent tasks reached (%d), skipping schedule check", runningCount)
 		return
 	}
 

@@ -140,9 +140,9 @@ func CreateLoggerWithFileRotation(logConfig config.LogConfig) (*logrus.Logger, e
 		// 使用 lumberjack 进行日志轮转
 		logWriter := &lumberjack.Logger{
 			Filename:   logConfig.FilePath,
-			MaxSize:    logConfig.MaxSize,    // MB
+			MaxSize:    logConfig.MaxSize, // MB
 			MaxBackups: logConfig.MaxBackups,
-			MaxAge:     logConfig.MaxAge,     // days
+			MaxAge:     logConfig.MaxAge, // days
 			Compress:   logConfig.Compress,
 		}
 
@@ -152,7 +152,7 @@ func CreateLoggerWithFileRotation(logConfig config.LogConfig) (*logrus.Logger, e
 	}
 
 	// 设置调用者报告
-	logger.SetReportCaller(true)
+	// logger.SetReportCaller(true)
 
 	return logger, nil
 }

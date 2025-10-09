@@ -234,7 +234,7 @@ func (j *DefaultTableSyncJob) saveProgress() error {
 	syncProgress := &storage.SyncProgress{
 		TaskID:       j.taskID,
 		SourceTable:  j.tableName,
-		TargetTable:  j.tableName, // 简化处理，假设目标表名相同
+		TargetTable:  j.dstTable,
 		TotalRows:    j.progress.TotalRows,
 		SyncedRows:   j.progress.ProcessedRows,
 		SyncedBytes:  j.stats.ProcessedBytes,

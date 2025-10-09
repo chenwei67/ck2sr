@@ -20,10 +20,10 @@ type StarRocksHTTPWriter struct {
 	ctx    context.Context
 }
 
-func NewStarRocksHTTPWriter(cfg *config.DataSourceConfig, cli *starrocks.HTTPClient) (*StarRocksHTTPWriter, error) {
+func NewStarRocksHTTPWriter(cfg *config.DataSourceConfig, cli *starrocks.HTTPClient, logger *logrus.Logger) (*StarRocksHTTPWriter, error) {
 	ret := &StarRocksHTTPWriter{
 		config: cfg,
-		logger: logrus.New().WithField("writer", "starrocks_http").Logger,
+		logger: logger,
 		buffer: make([]interface{}, 0),
 		ctx:    context.Background(),
 	}
@@ -55,7 +55,8 @@ func (w *StarRocksHTTPWriter) Write(ctx context.Context, records interface{}) er
 	}
 
 	// 打印HTTP请求body数据用于调试
-	w.logger.Debugf("Put Data: %s", string(data))
+	w.logger.Infof("stream write %d bytes data", len(data))
+	w.logger.Debugf("stream write data %+v", string(data))
 
 	buf := bytes.NewBuffer(data)
 	_, err = w.client.StreamLoad(ctx, options, buf)
@@ -83,7 +84,7 @@ type StarRocksMySQLWriter struct {
 	ctx    context.Context
 }
 
-func NewStarRocksMySQLWriter(cfg *config.DataSourceConfig, cli *starrocks.MySQLClient) (*StarRocksMySQLWriter, error) {
+func NewStarRocksMySQLWriter(cfg *config.DataSourceConfig, cli *starrocks.MySQLClient, logger *logrus.Logger) (*StarRocksMySQLWriter, error) {
 	ret := &StarRocksMySQLWriter{
 		config: cfg,
 		buffer: make([]interface{}, 0),

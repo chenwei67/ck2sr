@@ -3,6 +3,7 @@ package client
 import (
 	"fmt"
 
+	"github.com/sirupsen/logrus"
 	"github.com/sunkaimr/ck2sr/internal/config"
 	"github.com/sunkaimr/ck2sr/pkg/starrocks"
 )
@@ -11,7 +12,7 @@ type StarRocksCliMgr struct {
 	cli map[string]*starrocks.Client
 }
 
-func NewStarRocksClientMgr(config []config.StarRocksConfig) (*StarRocksCliMgr, error) {
+func NewStarRocksClientMgr(config []config.StarRocksConfig, logger *logrus.Logger) (*StarRocksCliMgr, error) {
 	ret := &StarRocksCliMgr{
 		cli: make(map[string]*starrocks.Client),
 	}
@@ -26,7 +27,7 @@ func NewStarRocksClientMgr(config []config.StarRocksConfig) (*StarRocksCliMgr, e
 			return nil, fmt.Errorf("failed to generate starrocks config %s: %w", cfg.Name, err)
 		}
 
-		cli, err := starrocks.NewClient(c)
+		cli, err := starrocks.NewClient(c, logger)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create starrocks client %s: %w", cfg.Name, err)
 		}

@@ -68,7 +68,7 @@ func (r *ClickHouseMySQLReader) SetQuery(query string) ExecutableReader {
 // Execute 执行SQL查询
 func (r *ClickHouseMySQLReader) Execute(ctx context.Context) error {
 	r.ctx = ctx
-	r.logger.Debugf("Executing query: %s", r.query)
+	r.logger.Infof("Executing query: %s", r.query)
 	rows, err := r.client.Query(ctx, r.query)
 	if err != nil {
 		return fmt.Errorf("failed to execute query [%s]: %w", r.query, err)
