@@ -1,592 +1,598 @@
-# ck2sr - ClickHouse to StarRocks 数据同步服务
+# ck2sr - ClickHouse to StarRocks 数据同步工具
 
 [![Go Version](https://img.shields.io/badge/Go-1.25.1-blue.svg)](https://golang.org)
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
-[![Build Status](https://img.shields.io/badge/Build-Passing-brightgreen.svg)]()
+[![Version](https://img.shields.io/badge/Version-v2.0-brightgreen.svg)]()
 
-**ck2sr** 是一个高效、可靠、完整的 ClickHouse 到 StarRocks 数据同步服务，采用 **ClickHouse ArrowStream 原生格式** 和 **StarRocks Arrow Flight SQL** 实现**真正的零拷贝**数据传输，支持分布式部署，能够在生产环境中稳定运行。
+**ck2sr** 是一个高性能、可扩展的 ClickHouse 到 StarRocks 数据同步工具，采用清晰的分层架构设计，支持多协议、策略驱动、并发同步，适用于生产环境的大规模数据迁移和同步场景。
 
-## 🌟 核心特性
+## ✨ 核心特性
 
-- **🚀 真正的零拷贝架构**：ClickHouse 使用原生 `FORMAT ArrowStream` 直接输出，StarRocks 使用 Arrow Flight SQL 流式写入，实现端到端零拷贝传输
-- **⚡ 极致性能优化**：基于 Apache Arrow 列式内存格式，避免数据序列化/反序列化开销，显著提升同步性能
-- **🔄 流式传输架构**：支持大数据集的实时流式传输，内存占用低，支持TB级数据同步
-- **🆕 智能数据转换引擎**：实时数据转换、类型转换、数据验证和清洗 (v2.2.0+)
-- **🆕 灵活表名控制**：直接使用配置的目标表名，无需自动后缀 (v2.2.0+)
-- **策略驱动**：通过配置文件定义数据同步任务，支持灵活的同步策略
-- **流量控制**：支持全局和任务级别的速率限制，防止对源系统造成压力
-- **并发控制**：支持多工作单元并发同步，提高同步效率
-- **时间窗口**：支持在指定时间段内执行同步任务
-- **断点续传**：任务状态持久化，支持服务重启后的断点续传
-- **数据完整性**：提供数据校验能力，确保同步的数据完整性
-- **分布式协同**：支持 Kubernetes 环境下的分布式部署
-- **监控告警**：内置 Prometheus 指标和健康检查接口
-- **数据处理管道**：支持数据过滤、转换和验证
-- **压缩传输**：支持多种压缩算法 (LZ4、ZSTD、GZIP) 降低网络带宽占用
-- **灵活日志控制**：命令行选项控制日志格式，支持生产环境优化
+- **🏗️ 分层架构设计**：Application → Business → Protocol → Infrastructure 清晰的四层架构
+- **🔌 多协议支持**：灵活选择 ClickHouse (MySQL/HTTP) 和 StarRocks (MySQL/HTTP/FlightSQL) 协议
+- **⚙️ 策略驱动配置**：通过 YAML 配置文件灵活控制同步行为，无需修改代码
+- **🚀 并发处理机制**：支持多表并发同步和多 Writer 并发写入，提升同步效率
+- **📅 任务调度系统**：基于 Scheduler 的任务管理，支持时间窗口和优先级控制
+- **💾 断点续传**：任务状态持久化，支持服务重启后从断点继续同步
+- **🎯 数据过滤与映射**：支持列过滤、列映射、固定值列等灵活的数据处理
+- **📊 监控与日志**：详细的进度报告、统计信息和可配置的日志输出
 
 ## 🏗️ 系统架构
 
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   ClickHouse    │    │      ck2sr      │    │    StarRocks    │
-│   (数据源)      │───▶│   (同步服务)    │───▶│   (目标库)      │
-│                 │    │                 │    │                 │
-│ FORMAT          │    │ ArrowStream     │    │ Arrow Flight    │
-│ ArrowStream     │    │ Zero-Copy       │    │ SQL Streaming   │
-│ 原生输出        │    │ Streaming       │    │ Direct Write    │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-                               │
-                               ▼
-                    ┌─────────────────┐
-                    │  状态存储       │
-                    │ (File/K8s CRD)  │
-                    └─────────────────┘
+### 分层架构
 
-数据流: ClickHouse ArrowStream → ArrowStreamWriter → StarRocks Flight SQL
-协议: TCP Native ArrowStream + gRPC Arrow Flight SQL + 零拷贝内存传输
+```
+┌─────────────────────────────────────────────────────────┐
+│          Application Layer (cmd/)                       │
+│  ├─ ck2sr: 主程序入口                                    │
+│  └─ dtool: 数据生成工具                                  │
+└─────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────┐
+│       Business Logic Layer (internal/)                  │
+│  ├─ scheduler: 任务调度器（时间窗口、优先级管理）         │
+│  ├─ sync: 同步任务管理                                   │
+│  │   ├─ SyncTask: 多表同步任务管理                       │
+│  │   ├─ TableSyncJob: 单表同步作业                       │
+│  │   ├─ Pipeline: 异步数据处理管道                       │
+│  │   └─ Monitor: 同步进度监控                            │
+│  ├─ storage: 状态持久化（文件存储）                       │
+│  └─ config: 配置管理                                      │
+└─────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────┐
+│          Protocol Layer (internal/)                     │
+│  ├─ reader: 数据读取器工厂                               │
+│  │   ├─ ClickHouse Reader (MySQL/HTTP)                 │
+│  │   └─ StarRocks Reader (MySQL/FlightSQL)             │
+│  └─ writer: 数据写入器工厂                               │
+│      ├─ ClickHouse Writer (MySQL/HTTP)                 │
+│      └─ StarRocks Writer (MySQL/HTTP)                  │
+└─────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────┐
+│      Infrastructure Layer (pkg/)                        │
+│  ├─ protocol: 统一协议抽象（DataReader/DataWriter）      │
+│  ├─ clickhouse: ClickHouse 客户端封装                   │
+│  ├─ starrocks: StarRocks 客户端封装                     │
+│  └─ utils: 工具函数库（retry/array/json/time）          │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 数据流向
+
+```
+┌─────────────┐    ┌──────────────┐    ┌─────────────┐
+│ ClickHouse  │───▶│   Pipeline   │───▶│  StarRocks  │
+│  (Source)   │    │  (Processing)│    │   (Target)  │
+└─────────────┘    └──────────────┘    └─────────────┘
+                           │
+                           ▼
+                  ┌─────────────────┐
+                  │  State Storage  │
+                  │ (Progress Track)│
+                  └─────────────────┘
 ```
 
 ### 核心组件
 
-- **配置管理 (Config)**：统一的配置加载和管理
-- **任务管理 (Worker)**：数据同步任务的生命周期管理
-- **调度器 (Scheduler)**：支持 Cron 表达式的任务调度
-- **数据管道 (Pipeline)**：可扩展的数据处理管道
-- **状态存储 (Storage)**：任务状态的持久化存储
-- **监控 (Monitor)**：Prometheus 指标和健康检查
+- **Scheduler（调度器）**：负责任务调度、时间窗口管理和优先级控制
+- **SyncTask（同步任务）**：管理多表并发同步，协调 TableSyncJob
+- **TableSyncJob（表同步作业）**：单表同步执行单元，管理 Pipeline
+- **Pipeline（数据管道）**：异步数据处理管道，支持多 Writer 并发
+- **Reader/Writer Factory（工厂模式）**：动态创建不同协议的读写器
+- **Storage（状态存储）**：任务状态和进度持久化
 
 ## 🚀 快速开始
 
 ### 前置要求
 
 - Go 1.25.1+
-- ClickHouse 21.12+ (需支持 ArrowStream 格式输出)
-- StarRocks 4.0+ (需支持 Arrow Flight SQL)
-- Docker (可选)
-- Kubernetes (可选，用于分布式部署)
-
-**注意**:
-- 确保 ClickHouse 支持 `FORMAT ArrowStream` 查询语法（ClickHouse 21.12+ 版本支持）
-- StarRocks 实例已开启 Arrow Flight SQL 支持
-- 如遇到连接问题，请参考 [故障排除文档](docs/troubleshooting-clickhouse-connection.md)
+- ClickHouse 19.0+
+- StarRocks 2.0+
+- Docker（可选）
 
 ### 安装
 
 #### 从源码构建
 
 ```bash
-git clone https://github.com/your-org/ck2sr.git
+git clone https://github.com/sunkaimr/ck2sr.git
 cd ck2sr
-go build -o ck2sr main.go
+go build -o ck2sr cmd/ck2sr/main.go
 ```
 
 #### 使用 Docker
 
 ```bash
-docker pull ck2sr:latest
-# 或者
-docker build -t ck2sr .
+docker build -t ck2sr:v2.0 .
 ```
 
 ### 配置
 
-复制配置文件模板：
-
-```bash
-cp configs/config.yaml config.yaml
-```
-
-编辑配置文件，设置数据库连接信息：
+创建配置文件 `config.yaml`：
 
 ```yaml
+# ClickHouse 数据库配置
 clickhouse:
-  host: "localhost"
-  port: 9000
-  username: "default"
-  password: ""
-  database: "default"
+  - name: myck-1
+    mysql:
+      host: "localhost"
+      port: 9004
+      username: "default"
+      password: ""
+      timeout: "30s"
+    http:
+      host: "localhost"
+      port: 8123
+      username: "default"
+      password: ""
+      timeout: "30s"
 
-  # ArrowStream 配置
-  batch_size: 10000
-  compression_type: "lz4"  # lz4, gzip, none
-  max_block_size: 100000
-  read_timeout: "30s"
-  write_timeout: "30s"
-  max_idle_conns: 10
-  max_open_conns: 100
-  conn_max_lifetime: "1h"
-
+# StarRocks 数据库配置
 starrocks:
-  host: "localhost"
-  port: 9030
-  username: "root"
-  password: ""
-  database: "test"
+  - name: mysr-1
+    mysql:
+      host: "localhost"
+      port: 9030
+      username: "root"
+      password: ""
+      timeout: "30s"
+    http:
+      host: "localhost"
+      port: 8030
+      username: "root"
+      password: ""
+      timeout: "30s"
 
-  # Arrow Flight SQL 配置
-  flight_sql_endpoint: "localhost"
-  flight_sql_port: 9090
-  flight_sql_auth:
-    username: "flight_user"
-    password: "flight_pass"
-  use_tls: false
-  flight_timeout: "30s"
-  batch_size: 10000
-  compression_type: "lz4"  # none, gzip, lz4, zstd
-
+# 同步任务配置
 sync_tasks:
-  - task_id: "user_data_sync"
-    name: "用户数据同步"
+  - task_id: "demo_sync_001"
+    name: "演示同步任务"
     enabled: true
-    source_table: "users"
-    target_table: "users_sync"    # v2.2.0+: 直接使用此表名，不再自动添加后缀
+    priority: 1
+    reader:
+      name: "myck-1"
+      vendor: "clickhouse"
+      protocol: "mysql"
+      database: "test"
+      tables:
+        - "orders"
+    writer:
+      name: "mysr-1"
+      vendor: "starrocks"
+      protocol: "http"
+      database: "test"
+      tables:
+        - "orders_sync"
+    settings:
+      batch_size: 10000
+      parallel_tables: 1
 
-    # 数据范围
-    data_range:
-      time_column: "created_at"
-      where: "status = 'active'"
+# 全局策略配置
+policy:
+  transfer:
+    batch_size: 10000
+    batch_interval: "5s"
+    progress_report_every: 10
+    writer_concurrency: 3
+  schedule:
+    check_interval: "1m"
+    max_concurrent_task: 2
 
-    # 🆕 数据转换配置 (v2.2.0+)
-    data_transform:
-      enabled: true
-      field_transforms:
-        - column: "username"
-          type_conversion:
-            source_type: "string"
-            target_type: "varchar"
-            expression: "trim"      # 去除首尾空格
-          validation:
-            pattern: "^[a-zA-Z0-9_]+$"
-          required: true
-        - column: "age"
-          type_conversion:
-            source_type: "int64"
-            target_type: "int32"
-          validation:
-            min_value: 0
-            max_value: 150
-          default_value: 0
-      global_rules:
-        - source_type: "float64"
-          target_type: "double"
-
-    # 数据校验
-    validate:
-      enabled: true
-      check_row_count: true
-      tolerance_percent: 1.0
+# 日志配置
+log:
+  level: "info"
+  format: "text"
+  output: "stdout"
 ```
 
 ### 运行
 
-#### 直接运行
-
 ```bash
-./ck2sr -config config.yaml
-```
+# 直接运行
+./ck2sr --config config.yaml
 
-#### 使用 Docker
-
-```bash
+# 使用 Docker
 docker run -d \
   --name ck2sr \
-  -p 8080:8080 \
-  -p 8081:8081 \
-  -v $(pwd)/config.yaml:/app/configs/config.yaml \
-  ck2sr:latest
+  -v $(pwd)/config.yaml:/app/config.yaml \
+  ck2sr:v2.0 --config /app/config.yaml
 ```
 
-#### 使用 Docker Compose
+## 📖 配置指南
 
-```bash
-docker-compose up -d
-```
+### 数据库连接配置
 
-#### Kubernetes 部署
-
-```bash
-kubectl apply -f configs/k8s-deployment.yaml
-```
-
-## 📖 详细文档
-
-### 🆕 v2.2.0 新功能文档
-- [数据转换功能完整指南](docs/data-transformation.md) - 字段级转换、验证、表达式处理
-- [更新日志](docs/CHANGELOG.md) - 详细的版本更新记录
-- [配置文件示例](configs/config.yaml) - 包含数据转换功能的完整配置示例
-
-### 配置说明
-
-#### 混合高性能数据传输架构
-
-ck2sr v2.1+ 采用混合架构进行高性能数据传输，相比传统的 Stream Load 方式具有以下优势：
-
-- **零拷贝传输**: ClickHouse ArrowStream 直接传输到 StarRocks Arrow Flight SQL
-- **高性能**: 基于列式存储格式，端到端 Arrow 格式传输
-- **标准化**: ClickHouse 使用原生 TCP 协议，StarRocks 使用 Arrow Flight SQL 标准协议
-- **压缩传输**: 支持多种压缩算法降低网络开销
-- **流式处理**: 支持大数据集的流式传输
-
-##### ClickHouse TCP + ArrowStream 配置
+#### ClickHouse 配置
 
 ```yaml
 clickhouse:
-  # 基本数据库连接配置
-  host: "localhost"
-  port: 9000
-  username: "default"
-  password: ""
-  database: "default"
-
-  # ArrowStream 配置
-  batch_size: 10000                     # Arrow 批次大小
-  compression_type: "lz4"               # 压缩算法: lz4, gzip, none
-  max_block_size: 100000                # ClickHouse 块大小
-  read_timeout: "30s"                   # TCP 读取超时
-  write_timeout: "30s"                  # TCP 写入超时
-  max_idle_conns: 10                    # 最大空闲连接数
-  max_open_conns: 100                   # 最大连接数
-  conn_max_lifetime: "1h"               # 连接最大生命周期
+  - name: "myck-1"              # 实例名称，用于引用
+    mysql:                       # MySQL 协议配置（用于数据读取）
+      host: "localhost"
+      port: 9004
+      username: "default"
+      password: ""
+      timeout: "30s"
+    http:                        # HTTP 协议配置（用于 Stream Load）
+      host: "localhost"
+      port: 8123
+      username: "default"
+      password: ""
+      timeout: "30s"
 ```
 
-##### StarRocks Arrow Flight SQL 配置
+#### StarRocks 配置
 
 ```yaml
 starrocks:
-  # 基本数据库连接配置 (MySQL 协议用于元数据)
-  host: "localhost"
-  port: 9030
-  username: "root"
-  password: ""
-  database: "test"
-
-  # Arrow Flight SQL 配置
-  flight_sql_endpoint: "localhost"      # Flight SQL 服务地址
-  flight_sql_port: 9090                 # Flight SQL 服务端口
-  flight_sql_auth:                      # Flight SQL 独立认证
-    username: "flight_user"             # Flight SQL 用户名
-    password: "flight_pass"             # Flight SQL 密码
-  use_tls: false                        # 是否启用 TLS 加密
-  flight_timeout: "30s"                 # Flight SQL 写入超时时间
-  batch_size: 10000                     # Arrow 批次大小
-  compression_type: "lz4"               # 压缩算法: none, gzip, lz4, zstd
-  max_message_size: 100                 # gRPC 最大消息大小 (MB)
+  - name: "mysr-1"              # 实例名称，用于引用
+    mysql:                       # MySQL 协议配置（用于元数据查询）
+      host: "localhost"
+      port: 9030
+      username: "root"
+      password: ""
+      timeout: "30s"
+    flightsql:                   # FlightSQL 协议配置（高性能读取，可选）
+      host: "localhost"
+      port: 9408
+      username: "root"
+      password: ""
+      timeout: "30s"
+      tls:
+        enabled: false
+    http:                        # HTTP 协议配置（用于 Stream Load 写入）
+      host: "localhost"
+      port: 8030
+      username: "root"
+      password: ""
+      timeout: "30s"
 ```
 
-#### 从旧版本迁移到混合架构
-
-如果您正在从旧版本的 ck2sr 升级，需要进行以下配置更新：
-
-1. **更新 ClickHouse 配置 (从 Flight SQL 到 TCP + ArrowStream)**:
-   ```yaml
-   # 旧配置 (需要删除)
-   clickhouse:
-     flight_sql_endpoint: "localhost"
-     flight_sql_port: 9090
-     use_tls: false
-
-   # 新配置
-   clickhouse:
-     host: "localhost"
-     port: 9000  # TCP 端口
-     batch_size: 10000
-     compression_type: "lz4"
-     max_block_size: 100000
-     # ... 其他 TCP 配置
-   ```
-
-2. **保持 StarRocks Arrow Flight SQL 配置**:
-   ```yaml
-   # StarRocks 配置保持不变，继续使用 Arrow Flight SQL
-   starrocks:
-     flight_sql_endpoint: "localhost"
-     flight_sql_port: 9090
-     flight_sql_auth:
-       username: "flight_user"
-       password: "flight_pass"
-     # ... 其他 Flight SQL 配置
-   ```
-
-3. **确保数据库支持**:
-   - 验证 ClickHouse 支持 `FORMAT ArrowStream` 查询语法
-   - 验证 StarRocks 实例已启用 Arrow Flight SQL 支持
-
-#### 基本配置
-
-- **数据库连接**：配置 ClickHouse 和 StarRocks 的连接信息
-- **全局限制**：设置全局的流量控制、并发控制和重试策略
-- **监控配置**：启用 Prometheus 指标和健康检查
-
-#### 任务配置
-
-每个同步任务支持以下配置：
+### 同步任务配置
 
 ```yaml
 sync_tasks:
-  - task_id: "unique_task_id"
-    name: "任务名称"
-    description: "任务描述"
-    enabled: true
-    source_table: "源表名"
-    target_table: "目标表名"
+  - task_id: "task_001"          # 任务唯一标识
+    name: "用户数据同步"           # 任务名称
+    enabled: true                 # 是否启用
+    priority: 1                   # 优先级（数字越小优先级越高）
 
-    # 数据范围
-    data_range:
-      time_column: "时间列名"
-      start_time: "2023-01-01 00:00:00"
-      end_time: "2023-12-31 23:59:59"
-      where: "额外的 WHERE 条件"
+    # 数据源配置
+    reader:
+      name: "myck-1"              # 引用 ClickHouse 实例名称
+      vendor: "clickhouse"        # 数据库厂商
+      protocol: "mysql"           # 使用的协议：mysql/http
+      database: "test"            # 数据库名
+      tables:                     # 源表列表
+        - "users"
+        - "orders"
 
-    # 时间窗口
-    time_window:
-      start_time: "01:00"
-      end_time: "05:00"
+    # 数据目标配置
+    writer:
+      name: "mysr-1"              # 引用 StarRocks 实例名称
+      vendor: "starrocks"         # 数据库厂商
+      protocol: "http"            # 使用的协议：mysql/http/flightsql
+      database: "test"            # 数据库名
+      tables:                     # 目标表列表（与源表一一对应）
+        - "users_sync"
+        - "orders_sync"
 
-    # 流量控制
-    rate_limit:
-      max_bytes_per_second: 52428800  # 50MB/s
-      max_rows_per_second: 50000
-      burst_size: 1000
+    # 同步设置
+    settings:
+      # 数据范围
+      data_range:
+        time_column: "created_at"           # 时间列名
+        start_time: "2024-01-01 00:00:00"  # 起始时间
+        end_time: ""                        # 结束时间（空表示同步到最新）
 
-    # 并发控制
-    concurrency:
-      max_workers: 5
-      batch_size: 10000
+      # 时间窗口
+      time_window:
+        start_time: "01:00"      # 允许同步的起始时间
+        end_time: "05:00"        # 允许同步的结束时间
 
-    # 重试配置
-    retry:
-      max_retries: 3
-      initial_delay: "1s"
-      max_delay: "30s"
-      backoff_factor: 2.0
+      # 速率限制
+      rate_limit:
+        max_bytes_per_second: 52428800    # 最大字节/秒（50MB/s）
+        max_rows_per_second: 50000        # 最大行数/秒
+        burst_size: 1000                  # 突发大小
 
-    # 数据验证
-    validate:
-      enabled: true
-      check_row_count: true
-      check_checksum: true
-      check_columns: ["id", "name"]
-      tolerance_percent: 1.0
+      # 重试配置
+      retry:
+        max_retries: 3
+        initial_delay: "2s"
+        max_delay: "60s"
+        backoff_factor: 2.0
 
-    # 列映射
-    column_mapping:
-      old_name: "new_name"
-      source_id: "target_id"
+      # 列映射
+      column_mapping:
+        user_id: "id"              # 源列名: 目标列名
+        create_time: "created_at"
 
-    # 调度配置
-    cron_expression: "0 2 * * *"  # 每天凌晨 2 点
-    priority: 1
+      # 批处理设置
+      batch_size: 10000            # 批处理大小
+      batch_interval: "5s"         # 批次间隔时间
+      parallel_tables: 2           # 并行处理表的数量
 ```
 
-### API 接口
-
-#### 监控接口
-
-- **健康检查**：`GET /health`
-- **就绪检查**：`GET /ready`
-- **Prometheus 指标**：`GET /metrics`
-
-#### 管理接口
-
-- **任务列表**：`GET /api/tasks`
-- **调度列表**：`GET /api/schedules`
-- **同步进度**：`GET /api/progress`
-
-### 数据处理管道
-
-ck2sr 支持可扩展的数据处理管道，内置以下处理器：
-
-#### 🆕 数据转换处理器 (Data Transform) - v2.2.0+
+### 全局策略配置
 
 ```yaml
-data_transform:
-  enabled: true
-  field_transforms:
-    - column: "username"
-      type_conversion:
-        source_type: "string"
-        target_type: "varchar"
-        expression: "trim"        # 去除首尾空格
-      validation:
-        pattern: "^[a-zA-Z0-9_]+$"  # 正则验证
-        allow_null: false
-      required: true
-    - column: "price"
-      type_conversion:
-        source_type: "float64"
-        target_type: "decimal(15,2)"
-      validation:
-        min_value: 0.01
-        max_value: 999999.99
-      default_value: 0.00
-  global_rules:
-    - source_type: "string"
-      target_type: "varchar"
-    - source_type: "int64"
-      target_type: "bigint"
+policy:
+  # 数据传输策略
+  transfer:
+    batch_size: 10000                     # 默认批次大小
+    batch_interval: "5s"                  # 批次间隔时间
+    progress_report_every: 10             # 每N批次输出进度
+    progress_report_timeout: "10s"        # 或超过N秒强制输出进度
+    rate_limit_sleep: "10ms"              # 速率控制休眠时间
+    writer_concurrency: 3                 # Writer 并发数量
+
+  # 调度策略
+  schedule:
+    check_interval: "1m"          # 时间窗口检查间隔
+    retry_interval: "5m"          # 失败重试间隔
+    max_concurrent_task: 2        # 最大并发任务数
+
+  # HTTP 客户端策略
+  http:
+    timeout: "30s"                        # 请求超时
+    idle_conn_timeout: "60s"              # 空闲连接超时
+    tls_handshake_timeout: "10s"          # TLS 握手超时
+    max_idle_conns: 100                   # 最大空闲连接数
+    max_conns_per_host: 10                # 每个主机最大连接数
+
+  # 数据过滤策略
+  filter:
+    exclude_columns: []           # 需要排除的列
+    fixed_values: {}              # 固定值列（临时方案）
+
+  # 重试策略（全局默认）
+  retry:
+    max_retries: 3
+    initial_delay: "2s"
+    max_delay: "60s"
+    backoff_factor: 2.0
 ```
 
-**支持的转换**:
-- **类型转换**: int64→int32, string→varchar, float64→decimal 等
-- **表达式转换**: upper, lower, trim, sprintf格式化
-- **数据验证**: 正则表达式、数值范围、空值检查
-- **默认值**: 处理缺失或无效数据
-- **必需字段**: 确保关键数据完整性
-
-详细配置请参考: [数据转换功能文档](docs/data-transformation.md)
-
-#### 列映射处理器 (Column Mapping)
-
-```yaml
-processors:
-  - name: "column_mapping"
-    type: "column_mapping"
-    enabled: true
-    parameters:
-      mapping:
-        old_column: "new_column"
-        source_id: "target_id"
-```
-
-#### 行过滤处理器 (Row Filter)
-
-```yaml
-processors:
-  - name: "row_filter"
-    type: "row_filter"
-    enabled: true
-    parameters:
-      conditions:
-        - column: "age"
-          operator: "gt"
-          value: 18
-        - column: "status"
-          operator: "eq"
-          value: "active"
-```
-
-#### 数据验证处理器 (Data Validator)
-
-```yaml
-processors:
-  - name: "data_validator"
-    type: "data_validator"
-    enabled: true
-    parameters:
-      rules:
-        - column: "email"
-          required: true
-          type: "string"
-          pattern: "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
-        - column: "age"
-          required: true
-          type: "int"
-          min_value: 0
-          max_value: 150
-```
-
-## 🔧 运维指南
-
-### 监控
-
-#### Prometheus 指标
-
-服务提供以下 Prometheus 指标：
-
-- `ck2sr_tasks_total`：总任务数
-- `ck2sr_tasks_running`：正在运行的任务数
-- `ck2sr_tasks_completed`：已完成的任务数
-- `ck2sr_tasks_failed`：失败的任务数
-- `ck2sr_sync_rows_total`：同步的总行数
-- `ck2sr_sync_bytes_total`：同步的总字节数
-- `ck2sr_sync_duration_seconds`：同步耗时
-
-#### 健康检查
-
-```bash
-# 检查服务健康状态
-curl http://localhost:8081/health
-
-# 检查服务就绪状态
-curl http://localhost:8081/ready
-```
-
-### 日志
-
-支持多种日志格式和输出方式：
+### 日志配置
 
 ```yaml
 log:
-  level: "info"          # debug, info, warn, error
-  format: "json"         # json, text
-  output: "stdout"       # stdout, file
+  level: "info"                  # 日志级别：debug, info, warn, error
+  format: "text"                 # 日志格式：json, text
+  output: "stdout"               # 输出目标：stdout, file
   file_path: "/var/log/ck2sr/ck2sr.log"
+  max_size: 100                  # 单个日志文件最大大小（MB）
+  max_backups: 10                # 保留的日志文件数量
+  max_age: 30                    # 日志文件保留天数
+  compress: true                 # 是否压缩归档日志
 ```
 
-### 性能调优
+## 💡 使用示例
 
-#### 混合架构性能优化
+### 单表同步
 
-- **批次大小调优**: 调整 `batch_size` 平衡内存使用和传输效率
-  ```yaml
-  # ClickHouse ArrowStream 推荐配置
-  clickhouse:
-    batch_size: 5000     # 小数据集
-    batch_size: 10000    # 中等数据集
-    batch_size: 20000    # 大数据集
+```yaml
+sync_tasks:
+  - task_id: "single_table_sync"
+    name: "单表同步示例"
+    enabled: true
+    reader:
+      name: "myck-1"
+      vendor: "clickhouse"
+      protocol: "mysql"
+      database: "test"
+      tables: ["users"]
+    writer:
+      name: "mysr-1"
+      vendor: "starrocks"
+      protocol: "http"
+      database: "test"
+      tables: ["users_sync"]
+    settings:
+      batch_size: 10000
+```
 
-  # StarRocks Flight SQL 推荐配置
-  starrocks:
-    batch_size: 5000     # 小数据集
-    batch_size: 10000    # 中等数据集
-    batch_size: 20000    # 大数据集
-  ```
+### 多表并发同步
 
-- **压缩算法选择**: 根据网络和 CPU 资源选择合适的压缩算法
-  ```yaml
-  compression_type: "lz4"    # 高压缩速度，适合 CPU 密集场景
-  compression_type: "gzip"   # 通用压缩，兼容性好
-  compression_type: "none"   # 无压缩，适合高速内网环境
-  ```
+```yaml
+sync_tasks:
+  - task_id: "multi_table_sync"
+    name: "多表并发同步示例"
+    enabled: true
+    reader:
+      name: "myck-1"
+      vendor: "clickhouse"
+      protocol: "mysql"
+      database: "test"
+      tables: ["users", "orders", "products"]
+    writer:
+      name: "mysr-1"
+      vendor: "starrocks"
+      protocol: "http"
+      database: "test"
+      tables: ["users_sync", "orders_sync", "products_sync"]
+    settings:
+      batch_size: 10000
+      parallel_tables: 3     # 3个表并发同步
+```
 
-- **ClickHouse TCP 连接优化**: 调整连接池和超时配置
-  ```yaml
-  clickhouse:
-    max_open_conns: 100      # 最大连接数
-    max_idle_conns: 10       # 最大空闲连接数
-    conn_max_lifetime: "1h"  # 连接生命周期
-    read_timeout: "30s"      # 读取超时
-    write_timeout: "30s"     # 写入超时
-  ```
+### 数据过滤和映射
 
-- **StarRocks Flight SQL 超时配置**: 根据数据量调整合理的超时时间
-  ```yaml
-  starrocks:
-    flight_timeout: "30s"   # 小批次数据
-    flight_timeout: "60s"   # 中等批次数据
-    flight_timeout: "120s"  # 大批次数据
-    max_message_size: 100   # gRPC 最大消息大小 (MB)
-  ```
+```yaml
+sync_tasks:
+  - task_id: "filter_and_mapping"
+    name: "数据过滤和映射示例"
+    enabled: true
+    reader:
+      name: "myck-1"
+      vendor: "clickhouse"
+      protocol: "mysql"
+      database: "test"
+      tables: ["users"]
+    writer:
+      name: "mysr-1"
+      vendor: "starrocks"
+      protocol: "http"
+      database: "test"
+      tables: ["users_sync"]
+    settings:
+      # 数据范围过滤
+      data_range:
+        time_column: "created_at"
+        start_time: "2024-01-01 00:00:00"
 
-#### 内存优化
+      # 列映射
+      column_mapping:
+        user_id: "id"
+        user_name: "name"
+        create_time: "created_at"
 
-- 调整 `batch_size` 控制批处理大小
-- 设置合适的 `max_workers` 数量
-- 使用 `rate_limit` 控制内存使用
-- Arrow 零拷贝传输减少内存分配和释放开销
-- ClickHouse TCP 连接池复用减少内存占用
+      batch_size: 10000
 
-#### 网络优化
+# 全局过滤配置
+policy:
+  filter:
+    exclude_columns:
+      - "internal_field"
+      - "temp_data"
+    fixed_values:
+      sync_timestamp: 1704067200
+```
 
-- 配置合适的连接池大小
-- 调整读写超时时间
-- 使用 `burst_size` 控制突发流量
-- 选择合适的压缩算法降低网络传输量
-- ClickHouse TCP 连接复用减少连接开销
-- StarRocks gRPC 连接池优化
+### 时间范围同步
 
-## 🧪 测试
+```yaml
+sync_tasks:
+  - task_id: "time_range_sync"
+    name: "时间范围同步示例"
+    enabled: true
+    reader:
+      name: "myck-1"
+      vendor: "clickhouse"
+      protocol: "mysql"
+      database: "test"
+      tables: ["events"]
+    writer:
+      name: "mysr-1"
+      vendor: "starrocks"
+      protocol: "http"
+      database: "test"
+      tables: ["events_sync"]
+    settings:
+      data_range:
+        time_column: "event_time"
+        start_time: "2024-01-01 00:00:00"
+        end_time: "2024-12-31 23:59:59"
+
+      # 时间窗口限制（仅在凌晨1点到5点执行）
+      time_window:
+        start_time: "01:00"
+        end_time: "05:00"
+
+      batch_size: 10000
+```
+
+## 🔧 开发指南
+
+### 项目结构
+
+```
+ck2sr/
+├── cmd/                        # 应用程序入口
+│   ├── ck2sr/                  # 主程序
+│   │   └── main.go
+│   └── dtool/                  # 数据生成工具
+│       └── main.go
+├── internal/                   # 内部业务逻辑
+│   ├── client/                 # 客户端管理器
+│   ├── config/                 # 配置管理
+│   ├── logging/                # 日志管理
+│   ├── reader/                 # 数据读取器工厂
+│   ├── scheduler/              # 任务调度器
+│   ├── storage/                # 状态存储
+│   ├── sync/                   # 同步核心逻辑
+│   │   ├── task.go             # 同步任务
+│   │   ├── table_sync_job.go   # 表同步作业
+│   │   ├── pipeline.go         # 数据处理管道
+│   │   ├── monitor.go          # 进度监控
+│   │   └── converter.go        # 数据转换器
+│   └── writer/                 # 数据写入器工厂
+├── pkg/                        # 可复用的公共库
+│   ├── protocol/               # 协议抽象
+│   │   ├── reader.go           # Reader 接口定义
+│   │   ├── writer.go           # Writer 接口定义
+│   │   └── types.go            # 通用类型定义
+│   ├── clickhouse/             # ClickHouse 客户端
+│   │   ├── client.go
+│   │   ├── mysql.go
+│   │   └── http.go
+│   ├── starrocks/              # StarRocks 客户端
+│   │   ├── client.go
+│   │   ├── mysql.go
+│   │   ├── flightsql.go
+│   │   └── http.go
+│   └── utils/                  # 工具函数
+│       ├── retry.go
+│       ├── array.go
+│       ├── json.go
+│       └── time.go
+├── configs/                    # 配置文件
+│   ├── config.yaml
+│   └── k8s-deployment.yaml
+├── docs/                       # 文档
+└── scripts/                    # 脚本
+```
+
+### 添加新协议支持
+
+1. **实现 Reader 接口**（在 `internal/reader/` 中）：
+
+```go
+type MyCustomReader struct {
+    // 实现 protocol.DataReader 接口
+}
+
+func (r *MyCustomReader) Next() bool { ... }
+func (r *MyCustomReader) GetRecord() (interface{}, error) { ... }
+func (r *MyCustomReader) Close() error { ... }
+```
+
+2. **实现 Writer 接口**（在 `internal/writer/` 中）：
+
+```go
+type MyCustomWriter struct {
+    // 实现 protocol.DataWriter 接口
+}
+
+func (w *MyCustomWriter) Write(ctx context.Context, records interface{}) error { ... }
+func (w *MyCustomWriter) Flush(ctx context.Context) error { ... }
+func (w *MyCustomWriter) Close() error { ... }
+```
+
+3. **在工厂中注册**：
+
+```go
+// 在 reader/factory.go 中
+func (f *ReaderFactory) CreateExecutable(cfg *config.ReaderConfig, ...) (ExecutableReader, error) {
+    switch cfg.Protocol {
+    case "mycustom":
+        return NewMyCustomReader(...)
+    // ...
+    }
+}
+
+// 在 writer/factory.go 中
+func (f *WriterFactory) Create(cfg *config.WriterConfig, ...) (ExecutableWriter, error) {
+    switch cfg.Protocol {
+    case "mycustom":
+        return NewMyCustomWriter(...)
+    // ...
+    }
+}
+```
 
 ### 运行测试
 
@@ -594,86 +600,196 @@ log:
 # 运行所有测试
 go test ./...
 
-# 运行测试并生成覆盖率报告
+# 运行带覆盖率的测试
 go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 
-# 使用测试脚本
-./scripts/test.sh        # Linux/macOS
-scripts/test.bat         # Windows
-```
+# 运行特定包的测试
+go test ./internal/sync/...
 
-### 基准测试
-
-```bash
+# 运行基准测试
 go test -bench=. -benchmem ./...
 ```
+
+## 🔍 运维指南
+
+### 性能调优
+
+#### 批处理大小优化
+
+```yaml
+policy:
+  transfer:
+    batch_size: 10000      # 小数据集：5000-10000
+                           # 中等数据集：10000-20000
+                           # 大数据集：20000-50000
+```
+
+#### Writer 并发优化
+
+```yaml
+policy:
+  transfer:
+    writer_concurrency: 3  # 根据目标数据库性能调整
+                           # 建议值：2-5
+                           # 过高可能导致目标数据库压力过大
+```
+
+#### 连接池优化
+
+```yaml
+policy:
+  http:
+    max_idle_conns: 100          # 最大空闲连接数
+    max_conns_per_host: 10       # 每个主机最大连接数
+    idle_conn_timeout: "60s"     # 空闲连接超时
+```
+
+### 监控指标
+
+当前版本通过日志输出监控信息，包括：
+
+- 任务执行状态
+- 数据同步进度（批次数、行数、速率）
+- 表级别统计信息
+- 错误和异常信息
+
+日志示例：
+
+```
+INFO: Starting sync task: demo_sync_001
+INFO: Progress [orders]: 10 batches, 100000 rows, 5234.56 rows/sec
+INFO: Successfully completed sync for table: orders
+INFO: === Task Summary ===
+INFO:   Success Rate: 1/1 tables
+INFO:   Total Rows: 100000
+INFO:   Total Bytes: 10485760
+INFO:   Total Duration: 19.123s
+```
+
+### 常见问题排查
+
+#### 1. 连接失败
+
+**问题**：无法连接到 ClickHouse 或 StarRocks
+
+**排查步骤**：
+- 检查网络连通性：`ping <host>`
+- 验证端口是否开放：`telnet <host> <port>`
+- 检查用户名和密码是否正确
+- 查看数据库日志
+
+#### 2. 同步速度慢
+
+**问题**：数据同步速度不符合预期
+
+**优化建议**：
+- 增加 `batch_size`
+- 提高 `writer_concurrency`
+- 检查网络带宽
+- 调整 `rate_limit_sleep`
+
+#### 3. 内存占用过高
+
+**问题**：程序内存占用过高
+
+**解决方案**：
+- 减小 `batch_size`
+- 降低 `writer_concurrency`
+- 减少 `parallel_tables` 数量
+- 检查是否有内存泄漏
+
+#### 4. 断点续传不生效
+
+**问题**：重启后未从断点继续
+
+**排查步骤**：
+- 检查 `storage_path` 配置是否正确
+- 验证进度文件是否存在：`ls ./data/`
+- 查看日志中的进度保存信息
+- 确认任务 ID 未更改
+
+### 日志分析
+
+#### 调整日志级别
+
+```yaml
+log:
+  level: "debug"    # 开发调试时使用
+  level: "info"     # 生产环境推荐
+  level: "warn"     # 仅关注警告和错误
+  level: "error"    # 仅记录错误
+```
+
+#### 日志格式
+
+```yaml
+log:
+  format: "json"    # JSON 格式，便于日志收集和分析
+  format: "text"    # 文本格式，便于人工阅读
+```
+
+## 📋 版本历史
+
+### v2.0（当前版本）
+
+**架构重构**：
+- 采用清晰的四层架构设计（Application → Business → Protocol → Infrastructure）
+- 实现工厂模式的 Reader/Writer，支持多协议动态切换
+- 引入 Scheduler 任务调度器，支持时间窗口和优先级管理
+- 实现异步 Pipeline 数据处理管道，支持多 Writer 并发
+
+**核心特性**：
+- 多协议支持：ClickHouse（MySQL/HTTP）、StarRocks（MySQL/HTTP/FlightSQL）
+- 策略驱动配置：全局策略与任务级配置分离
+- 并发处理：多表并发同步、多 Writer 并发写入
+- 状态持久化：支持断点续传和进度跟踪
+- 数据处理：列过滤、列映射、固定值列
+
+**技术栈**：
+- Go 1.25.1
+- ClickHouse Client v2
+- MySQL Driver
+- Apache Arrow ADBC（FlightSQL 支持）
 
 ## 🤝 贡献指南
 
 我们欢迎社区贡献！请遵循以下步骤：
 
 1. Fork 本仓库
-2. 创建特性分支 (`git checkout -b feature/amazing-feature`)
-3. 提交更改 (`git commit -m 'Add some amazing feature'`)
-4. 推送到分支 (`git push origin feature/amazing-feature`)
+2. 创建特性分支：`git checkout -b feature/amazing-feature`
+3. 提交更改：`git commit -m 'Add some amazing feature'`
+4. 推送到分支：`git push origin feature/amazing-feature`
 5. 创建 Pull Request
 
 ### 开发规范
 
 - 遵循 Go 官方编码规范
-- 编写单元测试，确保测试覆盖率 > 80%
+- 编写单元测试，确保测试覆盖率 > 70%
 - 使用中文注释说明函数和重要逻辑
 - 提交前运行 `go fmt` 和 `go vet`
+- 保持单文件行数在 500 行以内
+- 遵循分层架构，避免跨层调用
 
-## 🐛 问题反馈
+### 提交信息规范
 
-如果您遇到问题或有改进建议，请：
+```
+<type>(<scope>): <subject>
 
-1. 查看 [FAQ](docs/FAQ.md)
-2. 搜索现有的 [Issues](https://github.com/your-org/ck2sr/issues)
-3. 创建新的 Issue，详细描述问题
+<body>
 
-## 📋 版本历史
+<footer>
+```
 
-- **v2.3.0** (2024-09-18) - **重大架构重构**
-  - **🚀 真正零拷贝流式传输**: 重构为 ClickHouse ArrowStream → StarRocks Flight SQL 直接流式传输
-  - **⚡ 性能革命性提升**: 消除了数据行级处理和Arrow重构的性能瓶颈
-  - **🔄 流式写入器**: 新增 ArrowStreamWriter 支持连续流式写入，避免重复连接开销
-  - **🛠️ 重构同步工作器**: 实现端到端零拷贝数据传输架构
-  - **✅ 完整测试验证**: 所有模块编译测试通过，确保生产就绪
-  - **📚 文档全面更新**: 反映新的零拷贝架构和性能优势
-
-- **v2.2.0** (2024-09-17) - 数据转换与目标表优化
-  - **🎉 数据转换引擎**: 支持字段级数据转换、表达式转换和验证
-  - **🐛 目标表命名优化**: 直接使用配置的 `target_table` 字段，不再自动添加后缀
-  - **🚀 性能提升**: Arrow记录内存管理优化
-  - **🔧 新增组件**: pkg/transformer/ 数据转换引擎包
-
-- **v2.1.0** (2024-09-18)
-  - **架构重构**: 采用混合高性能传输架构
-  - ClickHouse: 从 Flight SQL 切换到 TCP 连接 + ArrowStream 格式查询
-  - StarRocks: 保持 Arrow Flight SQL 协议进行数据导入
-  - 实现零拷贝流式传输：ClickHouse ArrowStream → StarRocks Flight SQL
-  - 移除 ClickHouse Flight SQL 依赖，简化配置和代码结构
-  - 优化性能：原生 Arrow 格式端到端传输
-  - 启用 ClickHouse 原生协议版本和 LZ4 压缩
-  - 完整的单元测试覆盖和编译验证
-
-- **v2.0.0** (2024-09-17)
-  - **重大更新**: 全面采用 Apache Arrow Flight SQL 协议
-  - 统一 ClickHouse 数据读取和 StarRocks 数据写入为 Arrow Flight SQL
-  - 实现零拷贝列式数据传输，显著提升性能
-  - 支持多种压缩算法 (LZ4、ZSTD、GZIP)
-  - 基于 gRPC/HTTP2 的高性能网络通信
-  - 完整的单元测试覆盖
-  - 向后兼容 Stream Load 接口
-
-- **v1.0.0** (2024-01-xx)
-  - 初始版本发布
-  - 支持基本的数据同步功能
-  - 支持配置化的同步任务
-  - 支持数据完整性验证
+**类型（type）**：
+- `feat`: 新功能
+- `fix`: Bug 修复
+- `docs`: 文档更新
+- `style`: 代码格式调整
+- `refactor`: 重构
+- `perf`: 性能优化
+- `test`: 测试相关
+- `chore`: 构建/工具相关
 
 ## 📜 许可证
 
@@ -683,12 +799,17 @@ go test -bench=. -benchmem ./...
 
 感谢以下开源项目的支持：
 
-- [Apache Arrow](https://arrow.apache.org/) - 内存中列式数据格式和 Flight SQL 协议
 - [ClickHouse](https://clickhouse.com/) - 高性能列式数据库
 - [StarRocks](https://www.starrocks.io/) - 高性能分析数据库
-- [Prometheus](https://prometheus.io/) - 监控系统
-- [Kubernetes](https://kubernetes.io/) - 容器编排平台
+- [Apache Arrow](https://arrow.apache.org/) - 列式数据格式和 FlightSQL 协议
+- [Logrus](https://github.com/sirupsen/logrus) - 结构化日志库
+- [YAML](https://github.com/go-yaml/yaml) - YAML 解析库
+
+## 📞 联系方式
+
+- 问题反馈：[GitHub Issues](https://github.com/sunkaimr/ck2sr/issues)
+- 项目主页：[GitHub Repository](https://github.com/sunkaimr/ck2sr)
 
 ---
 
-如果您觉得这个项目有用，请给我们一个 ⭐️！
+**如果这个项目对您有帮助，请给我们一个 Star ⭐️**
