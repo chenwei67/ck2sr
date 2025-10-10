@@ -100,6 +100,7 @@ func (f *FileStorage) LoadSyncProgress(ctx context.Context, taskID string, table
 
 	filePath := filepath.Join(f.storagePath, fmt.Sprintf("progress_%s_%s.json", taskID, table))
 
+	f.logger.Infof("Loading sync progress from file: %s", filePath)
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {

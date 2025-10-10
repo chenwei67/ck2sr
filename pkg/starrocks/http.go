@@ -24,18 +24,26 @@ type HTTPClient struct {
 func NewHTTPClient(config *HTTPConfig, logger *logrus.Logger) (*HTTPClient, error) {
 	baseURL := fmt.Sprintf("http://%s:%d", config.Host, config.Port)
 
+	// 优化连接池配置：
+	// 1. MaxIdleConnsPerHost：控制空闲连接数，避免资源浪费
+	// 2. MaxConnsPerHost：限制单主机总连接数，防止连接数爆炸
+	// 3. IdleConnTimeout：空闲连接超时，释放无用连接
+	// 4. DisableKeepAlives：设为false，启用连接复用提高性能
 	httpClient := &http.Client{
 		Timeout: config.Timeout,
 		Transport: &http.Transport{
-			MaxIdleConns:        5,                // 全局最大空闲连接
-			MaxIdleConnsPerHost: 10,               // 单主机最大空闲连接（关键！）
-			MaxConnsPerHost:     50,               // 单主机最大总连接
-			IdleConnTimeout:     60 * time.Second, // 空闲超时
-			// 其他优化参数
-			TLSHandshakeTimeout: 10 * time.Second,
-			TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+			MaxIdleConns:        100,              // 全局最大空闲连接（所有主机）
+			MaxIdleConnsPerHost: 50,               // 单主机最大空闲连接（根据WriterConcurrency调整）
+			MaxConnsPerHost:     100,              // 单主机最大总连接（防止连接数爆炸）
+			IdleConnTimeout:     90 * time.Second, // 空闲连接超时
+			DisableKeepAlives:   false,            // 启用连接复用
+			// TLS 和超时配置
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second, // 响应头超时
+			ExpectContinueTimeout: 1 * time.Second,  // Expect: 100-continue 超时
+			TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
 		},
-		// 解决starRocks的FE重定向到BE时认证丢失问题
+		// 解决StarRocks的FE重定向到BE时认证丢失问题
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			SetStarRocksStreamLoadHeaders(req, config.Username, config.Password)
 			return nil // 返回 nil 表示信任所有重定向
@@ -49,6 +57,10 @@ func NewHTTPClient(config *HTTPConfig, logger *logrus.Logger) (*HTTPClient, erro
 		baseURL:    baseURL,
 	}, nil
 }
+
+// getNewClient 已废弃：每次创建新Client导致连接池隔离，引发连接数爆炸和死锁问题
+// 现在直接使用共享的 c.httpClient 实例，确保连接池配置生效
+// func (c *HTTPClient) getNewClient() *http.Client { ... }
 
 type StreamLoadResponse struct {
 	TxnID                  int64  `json:"TxnId"`
@@ -84,7 +96,16 @@ func SetStarRocksStreamLoadHeaders(req *http.Request, username, password string)
 func (c *HTTPClient) StreamLoad(ctx context.Context, options *StreamLoadOptions, data *bytes.Buffer) (*StreamLoadResponse, error) {
 	url := fmt.Sprintf("%s/api/%s/%s/_stream_load", c.baseURL, options.Database, options.Table)
 
-	req, err := http.NewRequestWithContext(ctx, "PUT", url, data)
+	// 为请求添加超时保护，防止永久阻塞
+	// 使用父context的超时，如果未设置则默认使用60秒
+	requestCtx := ctx
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		requestCtx, cancel = context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+	}
+
+	req, err := http.NewRequestWithContext(requestCtx, "PUT", url, data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -104,7 +125,10 @@ func (c *HTTPClient) StreamLoad(ctx context.Context, options *StreamLoadOptions,
 		req.Header.Set(k, v)
 	}
 
-	c.logger.Debugf("StreamLoad request send : %+v", req.Header)
+	c.logger.Debugf("StreamLoad request: URL=%s, Headers=%+v", url, req.Header)
+
+	// 使用共享的 httpClient 实例，确保连接池配置生效
+	// 避免每次创建新Client导致连接池隔离和连接数爆炸
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute stream load: %w", err)

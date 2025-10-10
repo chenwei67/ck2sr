@@ -38,6 +38,9 @@ type Pipeline struct {
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 
+	// 进度回调函数
+	progressCallback func(progress ProgressInfo)
+
 	// 统计信息
 	stats   *PipelineStats
 	statsMu sync.RWMutex
@@ -88,6 +91,11 @@ func NewPipeline(cfg *config.SyncTaskConfig,
 // SetStorage 设置存储接口，用于Offset持久化
 func (p *Pipeline) SetStorage(storage storage.Storage) {
 	p.storage = storage
+}
+
+// SetProgressCallback 设置进度回调函数，每次批次写入完成后调用
+func (p *Pipeline) SetProgressCallback(callback func(progress ProgressInfo)) {
+	p.progressCallback = callback
 }
 
 // Initialize 初始化Pipeline组件
@@ -408,7 +416,16 @@ func (p *Pipeline) processBatch(ctx context.Context, batch DataBatch, workerID i
 		return fmt.Errorf("worker %d failed to flush batch: %w", workerID, err)
 	}
 
+	// 计算批次的字节数
+	batchBytes, err := utils.CalculateBatchSize(batch.Data)
+	if err != nil {
+		p.logger.Warnf("Failed to calculate batch size: %v", err)
+		batchBytes = 0
+	}
+
+	// 更新统计信息：行数和字节数
 	p.monitor.AddRows(batch.Table, int64(len(batch.Data)))
+	p.monitor.AddBytes(batch.Table, batchBytes)
 	p.updateProcessedRows(int64(len(batch.Data)))
 
 	return nil
@@ -423,12 +440,15 @@ func (p *Pipeline) progressMonitor(ctx context.Context, table string) {
 
 	lastReportTime := time.Now()
 	lastProcessedRows := int64(0)
+	lastProcessedBytes := int64(0)
 
 	for {
 		select {
 		case progress := <-p.progressChan:
-			// 处理进度更新
-			_ = progress // 目前先不处理
+			// 调用进度回调函数（如果已设置）
+			if p.progressCallback != nil {
+				p.progressCallback(progress)
+			}
 
 		case <-ticker.C:
 			// 定期报告进度
@@ -436,15 +456,20 @@ func (p *Pipeline) progressMonitor(ctx context.Context, table string) {
 			currentTime := time.Now()
 			duration := currentTime.Sub(lastReportTime)
 			rowsProcessed := stats.TotalRows - lastProcessedRows
+			bytesProcessed := stats.TotalBytes - lastProcessedBytes
 
-			if rowsProcessed > 0 {
+			if rowsProcessed > 0 || bytesProcessed > 0 {
 				rowsPerSecond := float64(rowsProcessed) / duration.Seconds()
-				p.logger.Infof("Progress [%s]: %d batches, %d rows, %.2f rows/sec",
-					table, stats.BatchCount, stats.TotalRows, rowsPerSecond)
+				bytesPerSecond := float64(bytesProcessed) / duration.Seconds()
+
+				p.logger.Infof("Progress [%s]: %d batches, %d rows, %.2f rows/sec, %s, %.2f MB/sec",
+					table, stats.BatchCount, stats.TotalRows, rowsPerSecond,
+					utils.FormatBytes(stats.TotalBytes), bytesPerSecond/1024/1024)
 			}
 
 			lastReportTime = currentTime
 			lastProcessedRows = stats.TotalRows
+			lastProcessedBytes = stats.TotalBytes
 
 		case <-ctx.Done():
 			p.logger.Debugf("Progress monitor stopped for table %s", table)

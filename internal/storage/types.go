@@ -30,14 +30,15 @@ type TaskState struct {
 
 // SyncProgress 同步进度
 type SyncProgress struct {
-	TaskID       string    `json:"task_id"`
-	SourceTable  string    `json:"source_table"`
-	TargetTable  string    `json:"target_table"`
-	TotalRows    int64     `json:"total_rows"`
-	SyncedRows   int64     `json:"synced_rows"`
-	SyncedBytes  int64     `json:"synced_bytes"`
-	LastSyncTime time.Time `json:"last_sync_time"`
-	Progress     float64   `json:"progress"` // 百分比
+	TaskID        string    `json:"task_id"`
+	SourceTable   string    `json:"source_table"`
+	TargetTable   string    `json:"target_table"`
+	TotalRows     int64     `json:"total_rows"`       // 本次需要同步的总行数
+	SyncedRows    int64     `json:"synced_rows"`      // 已同步完成的行数
+	SyncedBytes   int64     `json:"synced_bytes"`     // 已同步完成的字节数
+	StartSyncTime time.Time `json:"start_sync_time"`  // 本次同步开始时间
+	LastSyncTime  time.Time `json:"last_sync_time"`   // 最后一次更新时间
+	Progress      float64   `json:"progress"`         // 百分比
 }
 
 // TableSyncProgress 表同步进度（兼容性类型）
