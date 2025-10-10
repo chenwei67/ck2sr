@@ -9,7 +9,7 @@ type Config struct {
 	ClickHouse []ClickHouseConfig `yaml:"clickhouse"`
 	StarRocks  []StarRocksConfig  `yaml:"starrocks"`
 	SyncTasks  []SyncTaskConfig   `yaml:"sync_tasks"`
-	Policy     PolicyConfig       `yaml:"policy"`      // 新增：策略配置
+	Policy     PolicyConfig       `yaml:"policy"` // 新增：策略配置
 	Monitor    MonitorConfig      `yaml:"monitor"`
 	Log        LogConfig          `yaml:"log"`
 	Service    ServiceConfig      `yaml:"service"`
@@ -17,7 +17,7 @@ type Config struct {
 
 // ClickHouse 数据库配置
 type ClickHouseConfig struct {
-	Name  string      `yaml:"name"`
+	Name  string       `yaml:"name"`
 	MySQL *MySQLConfig `yaml:"mysql,omitempty"`
 	HTTP  *HTTPConfig  `yaml:"http,omitempty"`
 }
@@ -69,19 +69,19 @@ type TLSConfig struct {
 
 // 同步任务配置
 type SyncTaskConfig struct {
-	TaskID   string              `yaml:"task_id"`
-	Name     string              `yaml:"name"`
-	Enabled  bool                `yaml:"enabled"`
-	Priority int                 `yaml:"priority"`
-	Reader   DataSourceConfig    `yaml:"reader"`
-	Writer   DataSourceConfig    `yaml:"writer"`
-	Settings SyncSettingsConfig  `yaml:"settings"`
+	TaskID   string             `yaml:"task_id"`
+	Name     string             `yaml:"name"`
+	Enabled  bool               `yaml:"enabled"`
+	Priority int                `yaml:"priority"`
+	Reader   DataSourceConfig   `yaml:"reader"`
+	Writer   DataSourceConfig   `yaml:"writer"`
+	Settings SyncSettingsConfig `yaml:"settings"`
 }
 
 // 数据源配置
 type DataSourceConfig struct {
 	Name     string   `yaml:"name"`
-	Vendor   string   `yaml:"vendor"`   // 新增：厂商配置 (starrocks/clickhouse)
+	Vendor   string   `yaml:"vendor"` // 新增：厂商配置 (starrocks/clickhouse)
 	Protocol string   `yaml:"protocol"`
 	Database string   `yaml:"database"`
 	Tables   []string `yaml:"tables"`
@@ -89,17 +89,16 @@ type DataSourceConfig struct {
 
 // 同步设置配置
 type SyncSettingsConfig struct {
-	DataRange             DataRangeConfig              `yaml:"data_range"`
-	TimeWindow            TimeWindowConfig             `yaml:"time_window"`
-	RateLimit             RateLimitConfig              `yaml:"rate_limit"`
-	Retry                 RetryConfig                  `yaml:"retry"`
-	ColumnMapping         map[string]string            `yaml:"column_mapping"`
+	DataRange             DataRangeConfig                `yaml:"data_range"`
+	TimeWindow            TimeWindowConfig               `yaml:"time_window"`
+	RateLimit             RateLimitConfig                `yaml:"rate_limit"`
+	Retry                 RetryConfig                    `yaml:"retry"`
+	ColumnMapping         map[string]string              `yaml:"column_mapping"`
 	TableSpecificSettings map[string]TableSpecificConfig `yaml:"table_specific_settings"`
-	BatchSize             int                          `yaml:"batch_size"`       // 按条数攒批
-	BatchBytes            int64                        `yaml:"batch_bytes"`      // 按数据大小攒批（字节数）
-	BatchInterval         time.Duration                `yaml:"batch_interval"`   // 新增：批次间隔时间
-	CSVFormat             CSVFormatConfig              `yaml:"csv_format"`
-	ParallelTables        int                          `yaml:"parallel_tables"`
+	BatchSize             int                            `yaml:"batch_size"`     // 按条数攒批
+	BatchBytes            int64                          `yaml:"batch_bytes"`    // 按数据大小攒批（字节数）
+	BatchInterval         time.Duration                  `yaml:"batch_interval"` // 新增：批次间隔时间
+	ParallelTables        int                            `yaml:"parallel_tables"`
 }
 
 // 数据范围配置
@@ -124,10 +123,10 @@ type RateLimitConfig struct {
 
 // 重试配置
 type RetryConfig struct {
-	MaxRetries     int           `yaml:"max_retries"`
-	InitialDelay   time.Duration `yaml:"initial_delay"`
-	MaxDelay       time.Duration `yaml:"max_delay"`
-	BackoffFactor  float64       `yaml:"backoff_factor"`
+	MaxRetries    int           `yaml:"max_retries"`
+	InitialDelay  time.Duration `yaml:"initial_delay"`
+	MaxDelay      time.Duration `yaml:"max_delay"`
+	BackoffFactor float64       `yaml:"backoff_factor"`
 }
 
 // 表特定配置
@@ -148,29 +147,28 @@ type CSVFormatConfig struct {
 
 // 监控配置
 type MonitorConfig struct {
-	Enabled           bool          `yaml:"enabled"`
-	MetricsPort       int           `yaml:"metrics_port"`
-	MetricsPath       string        `yaml:"metrics_path"`
-	UpdateInterval    time.Duration `yaml:"update_interval"`
-	HealthCheckPort   int           `yaml:"health_check_port"`
+	Enabled         bool          `yaml:"enabled"`
+	MetricsPort     int           `yaml:"metrics_port"`
+	MetricsPath     string        `yaml:"metrics_path"`
+	UpdateInterval  time.Duration `yaml:"update_interval"`
+	HealthCheckPort int           `yaml:"health_check_port"`
 }
 
 // 日志配置
 type LogConfig struct {
-	Level       string `yaml:"level"`
-	Format      string `yaml:"format"`
-	Output      string `yaml:"output"`
-	FilePath    string `yaml:"file_path"`
-	MaxSize     int    `yaml:"max_size"`
-	MaxBackups  int    `yaml:"max_backups"`
-	MaxAge      int    `yaml:"max_age"`
-	Compress    bool   `yaml:"compress"`
+	Level      string `yaml:"level"`
+	Format     string `yaml:"format"`
+	Output     string `yaml:"output"`
+	FilePath   string `yaml:"file_path"`
+	MaxSize    int    `yaml:"max_size"`
+	MaxBackups int    `yaml:"max_backups"`
+	MaxAge     int    `yaml:"max_age"`
+	Compress   bool   `yaml:"compress"`
 }
 
 // 服务配置
 type ServiceConfig struct {
-	StoragePath              string        `yaml:"storage_path"`
-	HeartbeatInterval        time.Duration `yaml:"heartbeat_interval"`
-	GracefulShutdownTimeout  time.Duration `yaml:"graceful_shutdown_timeout"`
-	MaxConcurrentTasks       int           `yaml:"max_concurrent_tasks"`
+	StoragePath             string        `yaml:"storage_path"`
+	HeartbeatInterval       time.Duration `yaml:"heartbeat_interval"`
+	GracefulShutdownTimeout time.Duration `yaml:"graceful_shutdown_timeout"`
 }

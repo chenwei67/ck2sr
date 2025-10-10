@@ -300,10 +300,10 @@ func (t *SyncTask) Execute(ctx context.Context) error {
 		}
 	}
 
-	// 保存进度
-	if err := t.saveProgress(ctx); err != nil {
-		t.logger.Errorf("Failed to save progress: %v", err)
-	}
+	// TODO: 这里为何要保存进度状态？不是已经在每个TableSyncJob里保存了吗？
+	// if err := t.saveProgress(ctx); err != nil {
+	// 	t.logger.Errorf("Failed to save progress: %v", err)
+	// }
 
 	// 记录总体统计
 	t.logSummaryStats(successCount, totalTables)
@@ -330,6 +330,7 @@ func (t *SyncTask) logTaskConfiguration() {
 	t.logger.Infof("  Database: %s", t.config.Reader.Database)
 	t.logger.Infof("  Tables: %v", t.config.Reader.Tables)
 	t.logger.Infof("  Batch Size: %d", t.config.Settings.BatchSize)
+	t.logger.Infof("  Batch Bytes: %d", t.config.Settings.BatchBytes)
 	t.logger.Infof("  Parallel Tables: %d", t.config.Settings.ParallelTables)
 	if t.config.Settings.BatchInterval > 0 {
 		t.logger.Infof("  Batch Interval: %v", t.config.Settings.BatchInterval)
@@ -357,16 +358,19 @@ func (t *SyncTask) saveProgress(ctx context.Context) error {
 			TargetTable:  tableName,
 			TotalRows:    progress.TotalRows,
 			SyncedRows:   progress.ProcessedRows,
+			SyncedBytes:  progress.ProcessedBytes,
 			LastSyncTime: progress.LastSyncTime,
 		}
 
 		// 计算进度百分比
 		if progress.TotalRows > 0 {
 			syncProgress.Progress = float64(progress.ProcessedRows) / float64(progress.TotalRows) * 100.0
+			// 保留两位小数
+			syncProgress.Progress = float64(int(syncProgress.Progress*100+0.5)) / 100
 		}
 
 		if progress.Status == "completed" {
-			syncProgress.Progress = 100.0
+			syncProgress.Progress = 100
 		}
 
 		// 保存到存储

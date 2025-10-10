@@ -37,16 +37,22 @@ type Scheduler struct {
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
 	once    sync.Once
+
+	// 两阶段调度相关
+	phase1Complete bool             // Phase 1 是否完成
+	taskResults    map[string]error // 任务执行结果
+	resultsMu      sync.RWMutex
 }
 
 func NewScheduler(cfg *config.PolicyConfig, store storage.Storage, logger *logrus.Logger) *Scheduler {
 	return &Scheduler{
-		config:  cfg,
-		storage: store,
-		logger:  logger,
-		tasks:   make(map[string]TaskExecutor),
-		running: make(map[string]context.CancelFunc),
-		stopCh:  make(chan struct{}),
+		config:      cfg,
+		storage:     store,
+		logger:      logger,
+		tasks:       make(map[string]TaskExecutor),
+		running:     make(map[string]context.CancelFunc),
+		stopCh:      make(chan struct{}),
+		taskResults: make(map[string]error),
 	}
 }
 
@@ -78,18 +84,33 @@ func (s *Scheduler) UnregisterTask(taskID string) error {
 }
 
 func (s *Scheduler) Start(ctx context.Context) error {
-	s.logger.Info("Scheduler starting...")
+	s.logger.Info("Scheduler starting with two-phase scheduling algorithm...")
 
-	s.wg.Add(1)
-	// 主动调度一次
-	s.once.Do(func() {
-		s.checkAndScheduleTasks(ctx)
-	})
+	// Phase 1: 执行所有未执行的任务（idle状态或无状态）
+	s.logger.Info("Phase 1: Executing all pending tasks...")
+	if err := s.executePhase1(ctx); err != nil {
+		s.logger.Errorf("Phase 1 execution failed: %v", err)
+		return err
+	}
+	s.phase1Complete = true
+	s.logger.Info("Phase 1 completed")
 
-	// 周期性调度
-	go s.schedulerLoop(ctx)
+	// Phase 2: 根据RetryTimes配置重试失败的任务
+	if s.config.Schedule.RetryTimes != 0 {
+		s.logger.Info("Phase 2: Retrying failed tasks...")
+		if err := s.executePhase2(ctx); err != nil {
+			s.logger.Errorf("Phase 2 execution failed: %v", err)
+			return err
+		}
+		s.logger.Info("Phase 2 completed")
+	} else {
+		s.logger.Info("Phase 2 skipped (RetryTimes = 0)")
+	}
 
-	s.logger.Info("Scheduler started")
+	// 生成退出码
+	exitCode := s.generateExitCode()
+	s.logger.Infof("Scheduler completed with exit code: %d", exitCode)
+
 	return nil
 }
 
@@ -111,136 +132,242 @@ func (s *Scheduler) Stop() error {
 	return nil
 }
 
-func (s *Scheduler) schedulerLoop(ctx context.Context) {
-	defer s.wg.Done()
-
-	ticker := time.NewTicker(s.config.Schedule.CheckInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-s.stopCh:
-			return
-		case <-ticker.C:
-			s.checkAndScheduleTasks(ctx)
-		}
-	}
-}
-
-func (s *Scheduler) checkAndScheduleTasks(ctx context.Context) {
+// executePhase1 执行Phase 1：执行所有未执行的任务（idle状态或无状态）
+func (s *Scheduler) executePhase1(ctx context.Context) error {
 	s.mu.RLock()
 	tasks := make(map[string]TaskExecutor, len(s.tasks))
 	for k, v := range s.tasks {
 		tasks[k] = v
 	}
-	runningCount := len(s.running)
 	s.mu.RUnlock()
 
-	if runningCount >= s.config.Schedule.MaxConcurrentTask {
-		return
-	}
-
+	// 筛选需要在Phase 1执行的任务（状态为idle或无状态）
+	pendingTasks := make(map[string]TaskExecutor)
 	for taskID, task := range tasks {
-		s.mu.RLock()
-		_, isRunning := s.running[taskID]
-		s.mu.RUnlock()
-
-		if isRunning {
-			continue
-		}
-
 		if !task.GetTaskConfig().Enabled {
 			s.logger.Debugf("Task %s is disabled, skipping", taskID)
 			continue
 		}
 
-		if s.shouldExecuteTask(ctx, taskID) {
-			s.executeTask(ctx, task)
-		}
-	}
-}
-
-func (s *Scheduler) shouldExecuteTask(ctx context.Context, taskID string) bool {
-	state, err := s.storage.LoadTaskState(ctx, taskID)
-	if err != nil {
-		s.logger.Warnf("Failed to load task state for %s: %v", taskID, err)
-		return true
-	}
-
-	if state == nil {
-		return true
-	}
-
-	if state.Status == storage.TaskStatusFailed {
-		timeSinceLastRun := time.Since(state.LastRunTime)
-		if timeSinceLastRun >= s.config.Schedule.RetryInterval {
-			return true
+		state, err := s.storage.LoadTaskState(ctx, taskID)
+		if err != nil || state == nil || state.Status == storage.TaskStatusIdle || state.Status == storage.TaskStatusRunning {
+			// 无状态、idle状态或者执行中的任务需要在Phase 1执行
+			pendingTasks[taskID] = task
+			s.logger.Infof("Phase 1: Task %s will be executed (status: %v)", taskID, state)
+		} else if state.Status == storage.TaskStatusSuccess {
+			s.logger.Infof("Phase 1: Task %s already completed, skipping", taskID)
+			s.resultsMu.Lock()
+			s.taskResults[taskID] = nil // 已成功的任务
+			s.resultsMu.Unlock()
+		} else if state.Status == storage.TaskStatusFailed {
+			s.logger.Infof("Phase 1: Task %s previously failed, will retry in Phase 2", taskID)
 		}
 	}
 
-	s.logger.Debugf("Task %s not eligible for execution (status: %+v)", taskID, state)
-	return false
+	if len(pendingTasks) == 0 {
+		s.logger.Info("Phase 1: No pending tasks to execute")
+		return nil
+	}
+
+	// 使用信号量控制并发度
+	semaphore := make(chan struct{}, s.config.Schedule.MaxConcurrentTask)
+	var phase1WG sync.WaitGroup
+
+	for taskID, task := range pendingTasks {
+		phase1WG.Add(1)
+		go func(id string, t TaskExecutor) {
+			defer phase1WG.Done()
+
+			// 获取信号量
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			err := s.executeTaskSync(ctx, t)
+			s.resultsMu.Lock()
+			s.taskResults[id] = err
+			s.resultsMu.Unlock()
+
+			if err != nil {
+				s.logger.Errorf("Phase 1: Task %s failed: %v", id, err)
+			} else {
+				s.logger.Infof("Phase 1: Task %s completed successfully", id)
+			}
+		}(taskID, task)
+	}
+
+	phase1WG.Wait()
+	s.logger.Infof("Phase 1: Completed %d tasks", len(pendingTasks))
+	return nil
 }
 
-func (s *Scheduler) executeTask(ctx context.Context, task TaskExecutor) {
+// executePhase2 执行Phase 2：重试失败的任务
+func (s *Scheduler) executePhase2(ctx context.Context) error {
+	retryTimes := s.config.Schedule.RetryTimes
+	retryInterval := s.config.Schedule.RetryInterval
+
+	// -1表示无限重试，用一个大数字代替
+	maxRetries := retryTimes
+	if retryTimes == -1 {
+		maxRetries = 1000000 // 实际上是无限重试
+	}
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		// 收集需要重试的失败任务
+		s.resultsMu.RLock()
+		failedTasks := make(map[string]TaskExecutor)
+		s.mu.RLock()
+		for taskID, err := range s.taskResults {
+			if err != nil {
+				if task, exists := s.tasks[taskID]; exists {
+					failedTasks[taskID] = task
+				}
+			}
+		}
+		s.mu.RUnlock()
+		s.resultsMu.RUnlock()
+
+		if len(failedTasks) == 0 {
+			s.logger.Info("Phase 2: No failed tasks to retry")
+			break
+		}
+
+		s.logger.Infof("Phase 2: Retry attempt %d/%d for %d failed tasks", attempt+1, maxRetries, len(failedTasks))
+
+		// 等待重试间隔
+		if attempt > 0 {
+			s.logger.Infof("Phase 2: Waiting %v before retry...", retryInterval)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryInterval):
+			}
+		}
+
+		// 使用信号量控制并发度
+		semaphore := make(chan struct{}, s.config.Schedule.MaxConcurrentTask)
+		var phase2WG sync.WaitGroup
+
+		for taskID, task := range failedTasks {
+			phase2WG.Add(1)
+			go func(id string, t TaskExecutor) {
+				defer phase2WG.Done()
+
+				// 获取信号量
+				semaphore <- struct{}{}
+				defer func() { <-semaphore }()
+
+				err := s.executeTaskSync(ctx, t)
+				s.resultsMu.Lock()
+				s.taskResults[id] = err
+				s.resultsMu.Unlock()
+
+				if err != nil {
+					s.logger.Errorf("Phase 2: Task %s retry failed: %v", id, err)
+				} else {
+					s.logger.Infof("Phase 2: Task %s retry succeeded", id)
+				}
+			}(taskID, task)
+		}
+
+		phase2WG.Wait()
+	}
+
+	// 统计最终结果
+	s.resultsMu.RLock()
+	failedCount := 0
+	for _, err := range s.taskResults {
+		if err != nil {
+			failedCount++
+		}
+	}
+	s.resultsMu.RUnlock()
+
+	if failedCount > 0 {
+		s.logger.Warnf("Phase 2: Completed with %d failed tasks", failedCount)
+	} else {
+		s.logger.Info("Phase 2: All tasks completed successfully")
+	}
+
+	return nil
+}
+
+// executeTaskSync 同步执行任务（阻塞直到任务完成）
+func (s *Scheduler) executeTaskSync(ctx context.Context, task TaskExecutor) error {
 	taskID := task.GetTaskID()
-	s.mu.Lock()
-	if _, isRunning := s.running[taskID]; isRunning {
-		s.mu.Unlock()
-		return
+	s.logger.Infof("Executing task: %s", taskID)
+
+	// 尝试加载之前的状态
+	existingState, _ := s.storage.LoadTaskState(ctx, taskID)
+
+	state := &storage.TaskState{
+		TaskID:        taskID,
+		Status:        storage.TaskStatusRunning,
+		LastRunTime:   time.Now(),
+		UpdatedAt:     time.Now(),
+		ScheduleTimes: 0,
+		FailedTimes:   0,
 	}
 
-	if len(s.running) >= s.config.Schedule.MaxConcurrentTask {
-		s.mu.Unlock()
-		return
+	// 如果有之前的状态，保留计数器和首次启动时间
+	if existingState != nil {
+		state.ScheduleTimes = existingState.ScheduleTimes
+		state.FailedTimes = existingState.FailedTimes
+		state.StartedAt = existingState.StartedAt
 	}
 
-	taskCtx, cancel := context.WithCancel(ctx)
-	s.running[taskID] = cancel
-	s.mu.Unlock()
+	// 首次执行时设置 StartedAt
+	if state.StartedAt.IsZero() {
+		state.StartedAt = time.Now()
+	}
 
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		defer func() {
-			s.mu.Lock()
-			delete(s.running, taskID)
-			s.mu.Unlock()
-		}()
+	if err := s.storage.SaveTaskState(ctx, state); err != nil {
+		s.logger.Errorf("Failed to save task state: %v", err)
+		return err
+	}
 
-		s.logger.Infof("Executing task: %s", taskID)
+	err := task.Execute(ctx)
 
-		state := &storage.TaskState{
-			TaskID:      taskID,
-			Status:      storage.TaskStatusRunning,
-			LastRunTime: time.Now(),
-			UpdatedAt:   time.Now(),
-		}
-		if err := s.storage.SaveTaskState(taskCtx, state); err != nil {
-			s.logger.Errorf("Failed to save task state: %v", err)
-		}
+	state.UpdatedAt = time.Now()
+	state.FinishedAt = time.Now()
+	if err != nil {
+		s.logger.Errorf("Task %s failed: %v", taskID, err)
+		state.Status = storage.TaskStatusFailed
+		state.LastError = err.Error()
+		state.FailedTimes++
+	} else {
+		s.logger.Infof("Task %s completed successfully", taskID)
+		state.Status = storage.TaskStatusSuccess
+	}
+	state.ScheduleTimes++
 
-		err := task.Execute(taskCtx)
+	if err := s.storage.SaveTaskState(ctx, state); err != nil {
+		s.logger.Errorf("Failed to save final task state: %v", err)
+	}
 
-		state.UpdatedAt = time.Now()
+	return err
+}
+
+// generateExitCode 生成进程退出码
+// 0: 所有任务成功
+// 1: 存在失败任务
+func (s *Scheduler) generateExitCode() int {
+	s.resultsMu.RLock()
+	defer s.resultsMu.RUnlock()
+
+	for taskID, err := range s.taskResults {
 		if err != nil {
 			s.logger.Errorf("Task %s failed: %v", taskID, err)
-			state.Status = storage.TaskStatusFailed
-			state.LastError = err.Error()
-			state.FailedRuns++
-		} else {
-			s.logger.Infof("Task %s completed successfully", taskID)
-			state.Status = storage.TaskStatusSuccess
-			state.SuccessRuns++
+			return 1
 		}
-		state.TotalRuns++
+	}
 
-		if err := s.storage.SaveTaskState(taskCtx, state); err != nil {
-			s.logger.Errorf("Failed to save final task state: %v", err)
-		}
-	}()
+	s.logger.Info("All tasks completed successfully")
+	return 0
+}
+
+// GetExitCode 获取进程退出码（供外部调用）
+func (s *Scheduler) GetExitCode() int {
+	return s.generateExitCode()
 }
 
 func (s *Scheduler) GetTaskStatus(taskID string) (TaskStatus, error) {

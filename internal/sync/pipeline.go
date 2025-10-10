@@ -109,11 +109,21 @@ func (p *Pipeline) Initialize(ctx context.Context, offset int64) error {
 		return fmt.Errorf("failed to create reader: %w", err)
 	}
 
+	// 为Reader包装重试功能
+	p.reader = reader.WrapReaderWithRetry(p.reader, &p.policy.Retry, p.logger)
+	p.logger.Infof("Reader initialized with retry policy: max_attempts=%d, initial_backoff=%v",
+		p.policy.Retry.MaxAttempts, p.policy.Retry.InitialBackoff)
+
 	p.writer, err = writerFactory.Create(&p.config.Writer, p.ckClientMgr, p.srClientMgr, p.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create writer: %w", err)
 	}
 	p.writer.SetTable(p.dstTable)
+
+	// 为Writer包装重试功能
+	p.writer = writer.WrapWriterWithRetry(p.writer, &p.policy.Retry, p.logger)
+	p.logger.Infof("Writer initialized with retry policy: max_attempts=%d, initial_backoff=%v",
+		p.policy.Retry.MaxAttempts, p.policy.Retry.InitialBackoff)
 
 	// 设置查询条件，并执行查询命令
 	query := fmt.Sprintf("SELECT * FROM %s.%s", p.config.Reader.Database, p.srcTable)
@@ -211,15 +221,9 @@ func (p *Pipeline) readData(ctx context.Context, table string) error {
 		p.logger.Infof("Starting read from offset: %d", currentOffset)
 	}
 
-	// 获取攒批配置：优先使用任务级配置，否则使用全局策略配置
+	// 获取攒批配置：从任务配置中获取
 	batchSize := p.config.Settings.BatchSize
-	if batchSize == 0 {
-		batchSize = p.policy.Transfer.BatchSize
-	}
 	batchBytes := p.config.Settings.BatchBytes
-	if batchBytes == 0 {
-		batchBytes = p.policy.Transfer.BatchBytes
-	}
 
 	// 如果两个配置都为0，使用默认条数1000
 	if batchSize == 0 && batchBytes == 0 {
@@ -435,7 +439,7 @@ func (p *Pipeline) processBatch(ctx context.Context, batch DataBatch, workerID i
 func (p *Pipeline) progressMonitor(ctx context.Context, table string) {
 	defer p.wg.Done()
 
-	ticker := time.NewTicker(time.Duration(p.policy.Transfer.ProgressReportEvery) * time.Second)
+	ticker := time.NewTicker(time.Duration(p.policy.Transfer.ProgressReportIntervalSec) * time.Second)
 	defer ticker.Stop()
 
 	lastReportTime := time.Now()

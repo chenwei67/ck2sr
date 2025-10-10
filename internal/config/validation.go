@@ -384,8 +384,6 @@ func validateService(config *Config) error {
 	if config.Service.GracefulShutdownTimeout <= 0 {
 		return fmt.Errorf("graceful_shutdown_timeout must be positive")
 	}
-	if config.Service.MaxConcurrentTasks <= 0 {
-		return fmt.Errorf("max_concurrent_tasks must be positive")
-	}
+
 	return nil
 }

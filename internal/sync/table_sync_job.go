@@ -156,6 +156,19 @@ func (j *DefaultTableSyncJob) Start(ctx context.Context) error {
 		progressLoaded = true
 		j.logger.Infof("Loaded progress for table %s: offset=%d, processed_rows=%d, total_rows=%d",
 			j.tableName, j.progress.Offset, j.progress.ProcessedRows, j.progress.TotalRows)
+
+		// 幂等性检查：如果表已经完成同步，直接返回成功
+		if j.progress.Status == "completed" || (j.progress.TotalRows > 0 && j.progress.ProcessedRows >= j.progress.TotalRows) {
+			j.logger.Infof("Table %s already completed (processed_rows=%d, total_rows=%d, status=%s), skipping resync",
+				j.tableName, j.progress.ProcessedRows, j.progress.TotalRows, j.progress.Status)
+			j.stats.Status = "completed"
+			j.mu.Unlock() // 释放锁
+			// 在goroutine中立即返回成功
+			go func() {
+				j.handleSuccess()
+			}()
+			return nil
+		}
 	}
 
 	// 查询本次需要同步的总行数（仅在没有加载进度或进度中没有总行数时查询）
@@ -289,7 +302,9 @@ func (j *DefaultTableSyncJob) queryTotalRows() (int64, error) {
 func (j *DefaultTableSyncJob) saveInitialProgress() error {
 	syncProgress := &storage.SyncProgress{
 		TaskID:        j.taskID,
+		SourceDB:      j.config.Reader.Database,  // 源数据库
 		SourceTable:   j.tableName,
+		TargetDB:      j.config.Writer.Database,  // 目标数据库
 		TargetTable:   j.dstTable,
 		TotalRows:     j.progress.TotalRows,
 		SyncedRows:    0, // 初始时未同步任何数据
@@ -322,6 +337,15 @@ func (j *DefaultTableSyncJob) loadProgress() error {
 	// 从存储中恢复StartSyncTime
 	j.stats.StartTime = syncProgress.StartSyncTime
 
+	// 根据进度数据判断状态
+	if syncProgress.Progress >= 100.0 || (syncProgress.TotalRows > 0 && syncProgress.SyncedRows >= syncProgress.TotalRows) {
+		j.progress.Status = "completed"
+	} else if syncProgress.SyncedRows > 0 {
+		j.progress.Status = "running" // 有进度但未完成，视为中断后待恢复
+	} else {
+		j.progress.Status = "pending"
+	}
+
 	return nil
 }
 
@@ -337,7 +361,9 @@ func (j *DefaultTableSyncJob) saveProgress() error {
 
 	syncProgress := &storage.SyncProgress{
 		TaskID:        j.taskID,
+		SourceDB:      j.config.Reader.Database,  // 源数据库
 		SourceTable:   j.tableName,
+		TargetDB:      j.config.Writer.Database,  // 目标数据库
 		TargetTable:   j.dstTable,
 		TotalRows:     j.progress.TotalRows,
 		SyncedRows:    j.progress.ProcessedRows,
@@ -387,7 +413,9 @@ func (j *DefaultTableSyncJob) onBatchProgress(progress ProgressInfo) {
 	// 创建进度数据快照，避免在异步保存时出现竞态条件
 	progressSnapshot := &storage.SyncProgress{
 		TaskID:        j.taskID,
+		SourceDB:      j.config.Reader.Database,  // 源数据库
 		SourceTable:   j.tableName,
+		TargetDB:      j.config.Writer.Database,  // 目标数据库
 		TargetTable:   j.dstTable,
 		TotalRows:     j.progress.TotalRows,
 		SyncedRows:    j.progress.ProcessedRows,

@@ -15,30 +15,33 @@ const (
 )
 
 // TaskState 任务状态
+// 对应文件：task_${task_id}.json
 type TaskState struct {
-	TaskID       string     `json:"task_id"`
-	Status       TaskStatus `json:"status"`
-	LastRunTime  time.Time  `json:"last_run_time"`
-	TotalRuns    int64      `json:"total_runs"`
-	SuccessRuns  int64      `json:"success_runs"`
-	FailedRuns   int64      `json:"failed_runs"`
-	LastError    string     `json:"last_error,omitempty"`
-	TotalRows    int64      `json:"total_rows"`
-	TotalBytes   int64      `json:"total_bytes"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	TaskID        string     `json:"task_id"`         // 任务唯一标识符
+	Status        TaskStatus `json:"status"`          // 任务执行状态（FSM状态）
+	ScheduleTimes int64      `json:"schedule_times"`  // 调度执行计数器
+	FailedTimes   int64      `json:"failed_times"`    // 失败计数器
+	StartedAt     time.Time  `json:"started_at"`      // 首次调度时间戳
+	LastRunTime   time.Time  `json:"last_run_time"`   // 最近调度时间戳
+	UpdatedAt     time.Time  `json:"updated_at"`      // 状态更新时间戳
+	FinishedAt    time.Time  `json:"finished_at"`     // 任务完成时间戳
+	LastError     string     `json:"last_error,omitempty"` // 最后错误信息（可选）
 }
 
 // SyncProgress 同步进度
+// 对应文件：progress_${task_id}_${table}.json
 type SyncProgress struct {
-	TaskID        string    `json:"task_id"`
-	SourceTable   string    `json:"source_table"`
-	TargetTable   string    `json:"target_table"`
-	TotalRows     int64     `json:"total_rows"`       // 本次需要同步的总行数
-	SyncedRows    int64     `json:"synced_rows"`      // 已同步完成的行数
-	SyncedBytes   int64     `json:"synced_bytes"`     // 已同步完成的字节数
-	StartSyncTime time.Time `json:"start_sync_time"`  // 本次同步开始时间
-	LastSyncTime  time.Time `json:"last_sync_time"`   // 最后一次更新时间
-	Progress      float64   `json:"progress"`         // 百分比
+	TaskID        string    `json:"task_id"`         // 任务ID
+	SourceDB      string    `json:"source_db"`       // 源数据库名
+	SourceTable   string    `json:"source_table"`    // 源表名
+	TargetDB      string    `json:"target_db"`       // 目标数据库名
+	TargetTable   string    `json:"target_table"`    // 目标表名
+	TotalRows     int64     `json:"total_rows"`      // 本次需要同步的总行数
+	SyncedRows    int64     `json:"synced_rows"`     // 已同步完成的行数（断点偏移量）
+	SyncedBytes   int64     `json:"synced_bytes"`    // 已同步完成的字节数
+	StartSyncTime time.Time `json:"start_sync_time"` // 本次同步开始时间
+	LastSyncTime  time.Time `json:"last_sync_time"`  // 最后一次更新时间
+	Progress      float64   `json:"progress"`        // 百分比（0.00-100.00）
 }
 
 // TableSyncProgress 表同步进度（兼容性类型）

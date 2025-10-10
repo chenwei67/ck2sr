@@ -15,20 +15,17 @@ type PolicyConfig struct {
 
 // TransferPolicyConfig 传输策略配置
 type TransferPolicyConfig struct {
-	BatchSize             int           `yaml:"batch_size"`               // 按条数攒批（全局默认）
-	BatchBytes            int64         `yaml:"batch_bytes"`              // 按数据大小攒批（字节数，全局默认）
-	BatchInterval         time.Duration `yaml:"batch_interval"`
-	ProgressReportEvery   int           `yaml:"progress_report_every"`
-	ProgressReportTimeout time.Duration `yaml:"progress_report_timeout"`
-	RateLimitSleep        time.Duration `yaml:"rate_limit_sleep"`
-	WriterConcurrency     int           `yaml:"writer_concurrency"`       // 新增：Writer并发数量
+	ProgressReportIntervalSec int           `yaml:"progress_report_interval_sec"` // 进度日志输出间隔（秒）
+	RateLimitSleep            time.Duration `yaml:"rate_limit_sleep"`             // 批次间限速休眠时间
+	WriterConcurrency         int           `yaml:"writer_concurrency"`           // Writer并发数量
 }
 
 // SchedulePolicyConfig 调度策略配置
 type SchedulePolicyConfig struct {
-	CheckInterval     time.Duration `yaml:"check_interval"`
-	RetryInterval     time.Duration `yaml:"retry_interval"`
-	MaxConcurrentTask int           `yaml:"max_concurrent_task"`
+	CheckInterval     time.Duration `yaml:"check_interval"`      // 定时任务扫描间隔
+	RetryInterval     time.Duration `yaml:"retry_interval"`      // 失败重试等待时间
+	RetryTimes        int           `yaml:"retry_times"`         // 最大重试次数：0=不重试，-1=无限重试，N=最多重试N次
+	MaxConcurrentTask int           `yaml:"max_concurrent_task"` // 最大并发任务数
 }
 
 // HTTPPolicyConfig HTTP策略配置
@@ -46,47 +43,46 @@ type FilterPolicyConfig struct {
 	FixedValues    map[string]interface{} `yaml:"fixed_values"`
 }
 
-// RetryPolicyConfig 重试策略配置
+// RetryPolicyConfig 重试策略配置（统一Reader、Writer、Scheduler的重试策略）
 type RetryPolicyConfig struct {
-	MaxRetries    int           `yaml:"max_retries"`
-	InitialDelay  time.Duration `yaml:"initial_delay"`
-	MaxDelay      time.Duration `yaml:"max_delay"`
-	BackoffFactor float64       `yaml:"backoff_factor"`
+	MaxAttempts        int           `yaml:"max_attempts"`        // 最大重试次数
+	InitialBackoff     time.Duration `yaml:"initial_backoff"`     // 初始退避时间
+	MaxBackoff         time.Duration `yaml:"max_backoff"`         // 最大退避时间
+	BackoffMultiplier  float64       `yaml:"backoff_multiplier"`  // 退避倍数（指数退避）
+	Jitter             bool          `yaml:"jitter"`              // 随机抖动，避免惊群效应
 }
 
 // DefaultPolicyConfig 默认策略配置
 func DefaultPolicyConfig() *PolicyConfig {
 	return &PolicyConfig{
 		Transfer: TransferPolicyConfig{
-			BatchSize:             10000,
-			BatchBytes:            0,              // 默认不启用字节数限制
-			BatchInterval:         5 * time.Second,
-			ProgressReportEvery:   10,
-			ProgressReportTimeout: 10 * time.Second,
-			RateLimitSleep:        10 * time.Millisecond,
-			WriterConcurrency:     3,              // 默认3个并发Writer
+			ProgressReportIntervalSec: 10,                      // 每10秒输出一次进度
+			RateLimitSleep:            1 * time.Millisecond,    // 1ms限速
+			WriterConcurrency:         1,                       // 默认1个并发Writer
 		},
 		Schedule: SchedulePolicyConfig{
-			CheckInterval:     1 * time.Minute,
-			RetryInterval:     5 * time.Minute,
-			MaxConcurrentTask: 2,
+			CheckInterval:     10 * time.Second,                // 每10秒检查一次
+			RetryInterval:     10 * time.Second,                // 失败后10秒重试
+			RetryTimes:        3,                               // 最多重试3次
+			MaxConcurrentTask: 1,                               // 默认1个并发任务
 		},
 		HTTP: HTTPPolicyConfig{
 			Timeout:             30 * time.Second,
 			IdleConnTimeout:     60 * time.Second,
 			TLSHandshakeTimeout: 10 * time.Second,
 			MaxIdleConns:        100,
-			MaxConnsPerHost:     10,
+			MaxConnsPerHost:     100,
 		},
 		Filter: FilterPolicyConfig{
 			ExcludeColumns: []string{},
 			FixedValues:    map[string]interface{}{},
 		},
 		Retry: RetryPolicyConfig{
-			MaxRetries:    3,
-			InitialDelay:  2 * time.Second,
-			MaxDelay:      60 * time.Second,
-			BackoffFactor: 2.0,
+			MaxAttempts:       3,                               // 最多重试3次
+			InitialBackoff:    1 * time.Second,                 // 初始1秒退避
+			MaxBackoff:        60 * time.Second,                // 最大60秒退避
+			BackoffMultiplier: 2.0,                             // 指数退避倍数2.0
+			Jitter:            true,                            // 启用随机抖动
 		},
 	}
 }
