@@ -12,8 +12,11 @@
 - **🔌 多协议支持**：灵活选择 ClickHouse (MySQL/HTTP) 和 StarRocks (MySQL/HTTP/FlightSQL) 协议
 - **⚙️ 策略驱动配置**：通过 YAML 配置文件灵活控制同步行为，无需修改代码
 - **🚀 并发处理机制**：支持多表并发同步和多 Writer 并发写入，提升同步效率
-- **📅 任务调度系统**：基于 Scheduler 的任务管理，支持时间窗口和优先级控制
-- **💾 断点续传**：任务状态持久化，支持服务重启后从断点继续同步
+- **📅 两阶段调度算法**：Phase 1 执行未完成任务，Phase 2 自动重试失败任务，确保数据完整性
+- **🔄 统一重试机制**：Reader/Writer/Scheduler 三级重试，支持指数退避和随机抖动
+- **💾 断点续传**：任务状态持久化，支持服务重启后从断点继续同步，避免重复传输
+- **🛡️ 幂等性保障**：已完成表不重复同步，失败任务支持断点续传（基于 synced_rows offset）
+- **⏱️ 超时保护机制**：轮询超时保护（1小时），避免任务挂起导致进程阻塞
 - **🎯 数据过滤与映射**：支持列过滤、列映射、固定值列等灵活的数据处理
 - **📊 监控与日志**：详细的进度报告、统计信息和可配置的日志输出
 
@@ -167,18 +170,26 @@ sync_tasks:
         - "orders_sync"
     settings:
       batch_size: 10000
+      batch_interval: "5s"
       parallel_tables: 1
 
 # 全局策略配置
 policy:
   transfer:
-    batch_size: 10000
-    batch_interval: "5s"
-    progress_report_every: 10
+    progress_report_interval_sec: 10
+    rate_limit_sleep: "10ms"
     writer_concurrency: 3
   schedule:
     check_interval: "1m"
+    retry_interval: "5m"
+    retry_times: 3
     max_concurrent_task: 2
+  retry:
+    max_attempts: 3
+    initial_backoff: "1s"
+    max_backoff: "60s"
+    backoff_multiplier: 2.0
+    jitter: true
 
 # 日志配置
 log:
@@ -322,39 +333,71 @@ sync_tasks:
 policy:
   # 数据传输策略
   transfer:
-    batch_size: 10000                     # 默认批次大小
-    batch_interval: "5s"                  # 批次间隔时间
-    progress_report_every: 10             # 每N批次输出进度
-    progress_report_timeout: "10s"        # 或超过N秒强制输出进度
-    rate_limit_sleep: "10ms"              # 速率控制休眠时间
-    writer_concurrency: 3                 # Writer 并发数量
+    progress_report_interval_sec: 10    # 进度日志输出间隔（秒）
+    rate_limit_sleep: "10ms"            # 批次间限速休眠时间
+    writer_concurrency: 3               # Writer并发数量（建议值：1-5）
 
   # 调度策略
   schedule:
-    check_interval: "1m"          # 时间窗口检查间隔
-    retry_interval: "5m"          # 失败重试间隔
-    max_concurrent_task: 2        # 最大并发任务数
+    check_interval: "1m"                # 定时任务扫描间隔（暂未使用）
+    retry_interval: "5m"                # 失败任务重试等待时间
+    retry_times: 3                      # 失败重试次数：0=不重试，-1=无限重试，N=最多重试N次
+    max_concurrent_task: 2              # 最大并发任务数（串行执行时设置为1）
 
   # HTTP 客户端策略
   http:
-    timeout: "30s"                        # 请求超时
-    idle_conn_timeout: "60s"              # 空闲连接超时
-    tls_handshake_timeout: "10s"          # TLS 握手超时
-    max_idle_conns: 100                   # 最大空闲连接数
-    max_conns_per_host: 10                # 每个主机最大连接数
+    timeout: "30s"                      # 请求超时
+    idle_conn_timeout: "60s"            # 空闲连接超时
+    tls_handshake_timeout: "10s"        # TLS握手超时
+    max_idle_conns: 100                 # 最大空闲连接数
+    max_conns_per_host: 10              # 每个主机最大连接数
 
   # 数据过滤策略
   filter:
-    exclude_columns: []           # 需要排除的列
-    fixed_values: {}              # 固定值列（临时方案）
+    exclude_columns: []                 # 需要排除的列
+    fixed_values: {}                    # 固定值列（临时方案）
 
-  # 重试策略（全局默认）
+  # 重试策略（统一Reader、Writer、Scheduler的重试策略）
   retry:
-    max_retries: 3
-    initial_delay: "2s"
-    max_delay: "60s"
-    backoff_factor: 2.0
+    max_attempts: 3                     # 最大重试次数（包含首次尝试）
+    initial_backoff: "1s"               # 初始退避时间（首次重试等待时间）
+    max_backoff: "60s"                  # 最大退避时间（防止退避时间过长）
+    backoff_multiplier: 2.0             # 退避倍数（指数退避）
+    jitter: true                        # 随机抖动（±25%，避免惊群效应）
 ```
+
+**关键配置说明**：
+
+#### transfer 配置
+- `progress_report_interval_sec`：每隔N秒输出一次进度日志，用于监控同步进度
+- `rate_limit_sleep`：批次写入之间的休眠时间，用于控制写入速率
+- `writer_concurrency`：并发Writer数量，过高可能导致目标数据库压力过大
+
+#### schedule 配置
+- `retry_times`：任务级别重试次数
+  - `0`：不重试，任务失败后直接退出
+  - `-1`：无限重试，直到成功或手动停止
+  - `N`：最多重试N次（N > 0）
+- `retry_interval`：每次重试之间的等待时间
+- `max_concurrent_task`：最大并发任务数，串行执行时设置为 `1`
+
+#### retry 配置（统一重试策略）
+- `max_attempts`：最大尝试次数（包含首次尝试，实际重试次数为 `max_attempts-1`）
+- `initial_backoff`：首次重试等待时间（例如：1s）
+- `max_backoff`：最大等待时间上限（例如：60s）
+- `backoff_multiplier`：指数退避倍数
+  - 第1次重试等待：`initial_backoff * backoff_multiplier^0 = 1s`
+  - 第2次重试等待：`initial_backoff * backoff_multiplier^1 = 2s`
+  - 第3次重试等待：`initial_backoff * backoff_multiplier^2 = 4s`
+  - 以此类推，直到达到 `max_backoff`
+- `jitter`：随机抖动开关
+  - `true`：在退避时间上增加 ±25% 随机浮动
+  - `false`：使用固定的退避时间
+  - 用途：避免多个失败任务同时重试导致的惊群效应
+
+#### filter 配置
+- `exclude_columns`：全局排除列列表，这些列不会被同步到目标表
+- `fixed_values`：全局固定值列映射，指定列将被替换为配置的固定值
 
 ### 日志配置
 
@@ -368,6 +411,141 @@ log:
   max_backups: 10                # 保留的日志文件数量
   max_age: 30                    # 日志文件保留天数
   compress: true                 # 是否压缩归档日志
+```
+
+**日志级别说明**：
+- `debug`：调试模式，输出详细的轮询日志、状态变更日志，用于故障排查
+- `info`：生产环境推荐，输出任务执行、进度、统计等关键信息
+- `warn`：仅输出警告和错误信息
+- `error`：仅输出错误信息
+
+### 状态文件说明
+
+ck2sr 使用文件系统持久化任务状态和进度信息，支持断点续传和任务恢复。状态文件存储在 `service.storage_path` 配置的目录中（默认 `./data`）。
+
+#### 任务状态文件
+
+**文件命名**：`task_${task_id}.json`
+
+**示例**：`task_ck2sr_demo_001.json`
+
+```json
+{
+  "task_id": "ck2sr_demo_001",
+  "status": "success",
+  "schedule_times": 1,
+  "failed_times": 0,
+  "started_at": "2025-10-10T21:51:45.495767435+08:00",
+  "last_run_time": "2025-10-10T21:51:45.495766009+08:00",
+  "updated_at": "2025-10-10T21:52:15.123456789+08:00",
+  "finished_at": "2025-10-10T21:52:15.123456789+08:00",
+  "last_error": ""
+}
+```
+
+**字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `task_id` | string | 任务唯一标识 |
+| `status` | string | 任务状态：`idle`（未执行）、`running`（执行中）、`success`（成功）、`failed`（失败） |
+| `schedule_times` | int64 | 调度次数（包含首次执行和所有重试） |
+| `failed_times` | int64 | 失败次数 |
+| `started_at` | timestamp | 首次启动时间 |
+| `last_run_time` | timestamp | 最后一次运行时间 |
+| `updated_at` | timestamp | 状态最后更新时间 |
+| `finished_at` | timestamp | 任务完成时间 |
+| `last_error` | string | 最后一次错误信息（成功时为空） |
+
+**状态转换图**：
+
+```
+     ┌──────┐
+     │ idle │ (初始状态/未执行)
+     └──┬───┘
+        │ Start()
+        ▼
+   ┌─────────┐
+   │ running │ (执行中)
+   └────┬────┘
+        │
+    ┌───┴────┐
+    ▼        ▼
+┌─────────┐ ┌────────┐
+│ success │ │ failed │
+└─────────┘ └───┬────┘
+                │
+          Phase 2 Retry
+                │
+                ▼
+          ┌─────────┐
+          │ running │
+          └─────────┘
+```
+
+#### 进度文件
+
+**文件命名**：`progress_${task_id}_${table}.json`
+
+**示例**：`progress_ck2sr_demo_001_orders.json`
+
+```json
+{
+  "task_id": "ck2sr_demo_001",
+  "source_db": "test",
+  "source_table": "orders",
+  "target_db": "test_sync",
+  "target_table": "orders_sync",
+  "total_rows": 100000,
+  "synced_rows": 100000,
+  "synced_bytes": 10485760,
+  "start_sync_time": "2025-10-10T21:51:45.496063445+08:00",
+  "last_sync_time": "2025-10-10T21:52:15.576051898+08:00",
+  "progress": 100.0
+}
+```
+
+**字段说明**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `task_id` | string | 所属任务ID |
+| `source_db` | string | 源数据库名 |
+| `source_table` | string | 源表名 |
+| `target_db` | string | 目标数据库名 |
+| `target_table` | string | 目标表名 |
+| `total_rows` | int64 | 总行数（估算值，基于 COUNT(*) 查询）|
+| `synced_rows` | int64 | 已同步行数（用于断点续传的 OFFSET）|
+| `synced_bytes` | int64 | 已同步字节数（用于速率统计）|
+| `start_sync_time` | timestamp | 同步开始时间 |
+| `last_sync_time` | timestamp | 最后同步时间 |
+| `progress` | float64 | 进度百分比（0.0-100.0）|
+
+**断点续传逻辑**：
+
+1. 任务启动时，读取 `progress_${task_id}_${table}.json` 文件
+2. 如果 `progress >= 100.0` 或 `synced_rows >= total_rows`，跳过该表（幂等性）
+3. 如果 `0 < synced_rows < total_rows`，从 `OFFSET synced_rows` 继续同步
+4. 每个批次写入成功后，更新 `synced_rows` 和 `synced_bytes`
+
+**状态文件路径配置**：
+
+```yaml
+service:
+  storage_path: "./data"  # 修改此路径可自定义状态文件存储位置
+```
+
+**清理状态文件**：
+
+如需重新开始同步（不使用断点续传），删除对应的状态文件即可：
+
+```bash
+# 删除指定任务的所有状态文件
+rm -f ./data/task_ck2sr_demo_001.json
+rm -f ./data/progress_ck2sr_demo_001_*.json
+
+# 清空所有状态文件
+rm -f ./data/*.json
 ```
 
 ## 💡 使用示例
@@ -678,36 +856,316 @@ INFO:   Total Duration: 19.123s
 - 验证端口是否开放：`telnet <host> <port>`
 - 检查用户名和密码是否正确
 - 查看数据库日志
+- 验证防火墙规则
 
-#### 2. 同步速度慢
+**常见错误**：
+```
+ERROR: failed to connect to mysql://localhost:9004: dial tcp: connection refused
+```
+
+**解决方案**：
+```yaml
+# 确认配置正确
+clickhouse:
+  - name: myck-1
+    mysql:
+      host: "192.168.1.100"  # 确保 host 可达
+      port: 9004              # 确认端口正确
+      username: "default"
+      password: "your_password"
+```
+
+#### 2. 任务挂起（Task Hang）
+
+**问题**：任务执行后无响应，无法继续执行后续任务
+
+**症状**：
+- 日志停留在某个表同步完成后
+- 任务状态文件显示 `"status": "running"`
+- 进度文件显示 `"progress": 100.0`
+
+**排查步骤**：
+
+1. **检查任务状态文件** (`./data/task_${task_id}.json`)：
+```bash
+cat ./data/task_ck2sr_demo_001.json
+```
+
+如果看到 `"status": "running"` 且已过去很长时间，说明任务可能挂起。
+
+2. **检查进度文件** (`./data/progress_${task_id}_${table}.json`)：
+```bash
+cat ./data/progress_ck2sr_demo_001_table3.json
+```
+
+如果 `"progress": 100.0` 但任务状态仍为 `running`，说明状态同步异常。
+
+3. **检查日志中的轮询信息**（需设置 `log.level: "debug"`）：
+```
+DEBUG Polling progress for table table3 (poll #1): status=completed, processed=10000/10000 rows
+INFO Successfully completed sync for table: table3
+```
+
+如果看不到 `Successfully completed` 日志，说明轮询未能正常退出。
+
+**根因**：
+- ✅ **已修复**：v2.0 版本已修复此问题（同步状态更新和轮询超时保护）
+- 状态异步更新导致轮询无法读取到 `completed` 状态
+- 轮询循环缺少超时保护机制
+
+**解决方案**：
+
+1. **临时解决**：手动更新状态文件并重启
+```bash
+# 停止进程
+kill <pid>
+
+# 手动修改任务状态为 success
+vi ./data/task_ck2sr_demo_001.json
+# 将 "status": "running" 改为 "status": "success"
+
+# 重启进程
+./ck2sr --config config.yaml
+```
+
+2. **永久解决**：升级到 v2.0+ 版本（已内置修复）
+
+**预防措施**：
+- 设置 `log.level: "debug"` 用于故障排查
+- 配置 `policy.schedule.max_concurrent_task: 1` 串行执行任务，便于定位问题
+
+#### 3. 断点续传不生效
+
+**问题**：重启后未从断点继续，而是从头开始同步
+
+**排查步骤**：
+
+1. **检查存储路径配置**：
+```yaml
+service:
+  storage_path: "./data"  # 确保路径存在且可写
+```
+
+2. **验证进度文件是否存在**：
+```bash
+ls -lh ./data/progress_*.json
+```
+
+3. **查看进度文件内容**：
+```bash
+cat ./data/progress_ck2sr_demo_001_orders.json
+```
+
+确认 `synced_rows` 字段是否正确记录。
+
+4. **检查日志中的偏移量信息**：
+```
+INFO Loaded progress for table orders: offset=50000, processed_rows=50000, total_rows=100000
+INFO Starting table synchronization for orders from offset 50000
+```
+
+**常见原因**：
+- 存储路径不正确或无写入权限
+- 进度文件被误删除
+- 任务 ID (`task_id`) 发生变化
+- 表名发生变化
+
+**解决方案**：
+```bash
+# 检查目录权限
+ls -ld ./data
+# 应输出类似：drwxr-xr-x ... ./data
+
+# 检查文件权限
+ls -l ./data/*.json
+# 应有读写权限
+
+# 如需重新开始，删除进度文件
+rm -f ./data/progress_ck2sr_demo_001_orders.json
+```
+
+#### 4. 同步速度慢
 
 **问题**：数据同步速度不符合预期
 
+**诊断**：
+
+1. **查看进度日志**：
+```
+INFO Progress [orders]: 10 batches, 100000 rows, 5234.56 rows/sec, 10.5 MB, 1.05 MB/sec
+```
+
+2. **计算期望速率**：
+- 网络带宽：1 Gbps = 125 MB/s
+- 实际速率：1.05 MB/s（远低于预期）
+
 **优化建议**：
-- 增加 `batch_size`
-- 提高 `writer_concurrency`
-- 检查网络带宽
-- 调整 `rate_limit_sleep`
 
-#### 3. 内存占用过高
+1. **增加批次大小**：
+```yaml
+settings:
+  batch_size: 20000      # 从 10000 增加到 20000
+  batch_bytes: 10485760  # 10MB
+```
 
-**问题**：程序内存占用过高
+2. **提高 Writer 并发**：
+```yaml
+policy:
+  transfer:
+    writer_concurrency: 5  # 从 3 增加到 5
+```
 
-**解决方案**：
-- 减小 `batch_size`
-- 降低 `writer_concurrency`
-- 减少 `parallel_tables` 数量
-- 检查是否有内存泄漏
+3. **减少批次间隔**：
+```yaml
+settings:
+  batch_interval: "100ms"  # 从 5s 减少到 100ms
+```
 
-#### 4. 断点续传不生效
+4. **检查网络带宽**：
+```bash
+# 测试网络速度
+iperf3 -c <target_host>
+```
 
-**问题**：重启后未从断点继续
+5. **检查目标数据库性能**：
+- 查看 StarRocks BE 节点的 CPU/内存/磁盘 IO
+- 检查是否有慢查询
+
+#### 5. 内存占用过高
+
+**问题**：程序内存占用过高，可能导致 OOM
+
+**诊断**：
+```bash
+# 查看内存占用
+ps aux | grep ck2sr
+# USER       PID %CPU %MEM    VSZ   RSS TTY      STAT START   TIME COMMAND
+# root     12345  5.0 15.2 2048000 1024000 ?    Ssl  10:00   0:30 ./ck2sr
+```
+
+**优化方案**：
+
+1. **减小批次大小**：
+```yaml
+settings:
+  batch_size: 5000       # 从 20000 减少到 5000
+  batch_bytes: 5242880   # 5MB
+```
+
+2. **降低 Writer 并发**：
+```yaml
+policy:
+  transfer:
+    writer_concurrency: 2  # 从 5 减少到 2
+```
+
+3. **减少并行表数量**：
+```yaml
+settings:
+  parallel_tables: 1  # 串行处理表
+```
+
+4. **检查是否有内存泄漏**：
+```bash
+# 使用 pprof 分析内存
+go tool pprof http://localhost:6060/debug/pprof/heap
+```
+
+#### 6. 重试不生效
+
+**问题**：任务失败后未自动重试
 
 **排查步骤**：
-- 检查 `storage_path` 配置是否正确
-- 验证进度文件是否存在：`ls ./data/`
-- 查看日志中的进度保存信息
-- 确认任务 ID 未更改
+
+1. **检查 `retry_times` 配置**：
+```yaml
+policy:
+  schedule:
+    retry_times: 3  # 确保不为 0
+```
+
+如果 `retry_times: 0`，则不会重试。
+
+2. **检查重试日志**：
+```
+INFO Phase 1: Task ck2sr_demo_001 will be executed (status: running)
+INFO Phase 1: Completed 1 tasks
+INFO Phase 2: Retry attempt 1/3 for 0 failed tasks
+INFO Phase 2: No failed tasks to retry
+```
+
+3. **检查任务状态**：
+```bash
+cat ./data/task_ck2sr_demo_001.json
+```
+
+如果 `"status": "failed"`，应该在 Phase 2 被重试。
+
+**常见原因**：
+- `retry_times` 设置为 0
+- 任务在 Phase 1 已成功，无需重试
+- `retry_interval` 设置过长，仍在等待
+
+**解决方案**：
+```yaml
+policy:
+  schedule:
+    retry_times: 3          # 或 -1（无限重试）
+    retry_interval: "1m"    # 减少等待时间
+```
+
+#### 7. 数据不一致
+
+**问题**：源表和目标表数据行数不一致
+
+**诊断**：
+
+1. **检查同步进度**：
+```bash
+cat ./data/progress_ck2sr_demo_001_orders.json
+# "synced_rows": 100000, "total_rows": 100000
+```
+
+2. **验证数据行数**：
+```sql
+-- 源表
+SELECT COUNT(*) FROM clickhouse.test.orders;
+-- 100000
+
+-- 目标表
+SELECT COUNT(*) FROM starrocks.test.orders_sync;
+-- 99500 (不一致！)
+```
+
+**可能原因**：
+- 数据写入过程中发生错误但未正确处理
+- 目标表有唯一键约束，部分数据被忽略
+- Stream Load 失败但未报错
+
+**排查方法**：
+
+1. **检查写入日志**：
+```
+INFO HTTP insert 10000 records, 1048576 bytes data to test.orders_sync
+ERROR failed to insert data: stream load failed with status 500: duplicate key
+```
+
+2. **检查 StarRocks Stream Load 结果**：
+```
+INFO Stream load response: {Status:Success NumberLoadedRows:9950 NumberFilteredRows:50 ...}
+```
+
+如果 `NumberFilteredRows > 0`，说明有数据被过滤。
+
+**解决方案**：
+- 检查目标表约束（主键、唯一键）
+- 启用 `log.level: "debug"` 查看详细写入日志
+- 对比源表和目标表的数据差异：
+```sql
+-- 找出缺失的数据
+SELECT * FROM clickhouse.test.orders
+WHERE id NOT IN (SELECT id FROM starrocks.test.orders_sync);
+```
 
 ### 日志分析
 
@@ -715,18 +1173,51 @@ INFO:   Total Duration: 19.123s
 
 ```yaml
 log:
-  level: "debug"    # 开发调试时使用
-  level: "info"     # 生产环境推荐
+  level: "debug"    # 开发调试时使用，输出轮询日志、状态变更日志
+  level: "info"     # 生产环境推荐，输出任务执行、进度、统计信息
   level: "warn"     # 仅关注警告和错误
   level: "error"    # 仅记录错误
+```
+
+#### 关键日志示例
+
+**正常执行日志**：
+```
+INFO Starting sync task: ck2sr_demo_001
+INFO Starting sync for table: orders
+INFO Progress [orders]: 10 batches, 100000/100000 rows (100.0%), 5234.56 rows/sec, 10.5 MB, 1.05 MB/sec
+INFO Successfully completed sync for table: orders
+INFO === Task Summary ===
+INFO   Success Rate: 1/1 tables
+INFO   Total Rows: 100000
+INFO   Total Bytes: 10485760
+INFO   Total Duration: 19.123s
+INFO All tasks completed successfully
+```
+
+**异常执行日志**：
+```
+INFO Starting sync task: ck2sr_demo_001
+INFO Starting sync for table: orders
+DEBUG Polling progress for table orders (poll #1): status=running, processed=50000/100000 rows
+ERROR failed to write batch: stream load failed with status 500
+ERROR Table orders sync failed
+WARN Partial success: 0/1 tables completed
+ERROR Scheduler execution failed: all tables failed, last error: table orders: stream load failed
 ```
 
 #### 日志格式
 
 ```yaml
 log:
-  format: "json"    # JSON 格式，便于日志收集和分析
-  format: "text"    # 文本格式，便于人工阅读
+  format: "json"    # JSON 格式，便于日志收集和分析（推荐用于生产环境）
+  format: "text"    # 文本格式，便于人工阅读（推荐用于开发调试）
+```
+
+**JSON 格式示例**：
+```json
+{"level":"info","msg":"Starting sync task: ck2sr_demo_001","time":"2025-10-10T21:51:45+08:00"}
+{"level":"info","msg":"Progress [orders]: 10 batches, 100000 rows","table":"orders","time":"2025-10-10T21:52:00+08:00"}
 ```
 
 ## 📋 版本历史

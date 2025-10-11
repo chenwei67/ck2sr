@@ -1,14 +1,18 @@
 # ck2sr 配置文件 v2.0
+# ClickHouse 到 StarRocks 数据同步工具配置
+
+# ==================== 数据库连接配置 ====================
+
 # ClickHouse 数据库配置
 clickhouse:
-  - name: myck-1
-    mysql: # MySQL协议接入配置（用于数据导出）
+  - name: myck-1              # 实例名称（用于任务引用）
+    mysql:                     # MySQL协议接入配置（用于数据导出）
       host: "localhost"
       port: 9004
       username: "default"
       password: ""
       timeout: "30s"
-    http: # HTTP协议接入配置（用于Stream Load数据导入）
+    http:                      # HTTP协议接入配置（用于数据导入）
       host: "localhost"
       port: 8123
       username: "default"
@@ -17,14 +21,14 @@ clickhouse:
 
 # StarRocks 数据库配置
 starrocks:
-  - name: mysr-1
-    mysql: # MySQL协议接入配置（用于数据导出，备用方案）
+  - name: mysr-1              # 实例名称（用于任务引用）
+    mysql:                     # MySQL协议接入配置（用于元数据查询）
       host: "localhost"
       port: 9030
       username: "root"
       password: ""
       timeout: "30s"
-    flightsql: # Arrow Flight SQL协议接入配置（用于数据导出）
+    flightsql:                 # Arrow Flight SQL协议接入配置（用于高性能数据导出）
       host: "localhost"
       port: 9408
       username: "root"
@@ -36,127 +40,171 @@ starrocks:
         key_file: ""
         ca_file: ""
         skip_verify: false
-    http: # HTTP协议接入配置（用于Stream Load数据导入）
+    http:                      # HTTP协议接入配置（用于Stream Load数据导入）
       host: "localhost"
       port: 8030
       username: "root"
       password: ""
       timeout: "30s"
 
-# 同步任务配置
+# ==================== 同步任务配置 ====================
+
 sync_tasks:
+  # 任务1：ClickHouse到StarRocks演示同步
   - task_id: "ck2sr_demo_001"
     name: "ClickHouse到StarRocks演示同步"
-    enabled: true
-    priority: 1
+    enabled: true                      # 是否启用任务
+    priority: 1                        # 优先级（数字越小优先级越高）
+
+    # 数据源配置
     reader:
-      name: "myck-1"          # 引用ClickHouse实例
-      vendor: "clickhouse"    # 新增：厂商标识
-      protocol: "mysql"       # 使用MySQL协议导出
-      database: "test"
-      tables:                 # 支持多张表同步
+      name: "myck-1"                   # 引用ClickHouse实例名称
+      vendor: "clickhouse"             # 数据库厂商：clickhouse/starrocks
+      protocol: "mysql"                # 使用协议：mysql/http
+      database: "test"                 # 数据库名
+      tables:                          # 源表列表（支持多张表同步）
         - "orders"
         - "users"
+
+    # 数据目标配置
     writer:
-      name: "mysr-1"          # 引用StarRocks实例
-      vendor: "starrocks"     # 新增：厂商标识
-      protocol: "http"        # 使用HTTP Stream Load导入
-      database: "test"
-      tables:                 # 目标表列表，与源表一一对应
+      name: "mysr-1"                   # 引用StarRocks实例名称
+      vendor: "starrocks"              # 数据库厂商：clickhouse/starrocks
+      protocol: "http"                 # 使用协议：mysql/http/flightsql
+      database: "test"                 # 数据库名
+      tables:                          # 目标表列表（与源表一一对应）
         - "orders_sync"
         - "users_sync"
+
+    # 任务级同步设置
     settings:
+      # 数据范围过滤
       data_range:
-        time_column: "created_at"
-        start_time: "2024-01-01 00:00:00"
-        end_time: ""          # 空表示同步到最新数据
+        time_column: "created_at"             # 时间列名
+        start_time: "2024-01-01 00:00:00"    # 起始时间（空表示不限制）
+        end_time: ""                          # 结束时间（空表示同步到最新数据）
+
+      # 时间窗口限制（仅在指定时间段内执行同步）
       time_window:
-        start_time: ""      # 清空时间窗口限制
-        end_time: ""
+        start_time: ""                 # 起始时间（格式：HH:MM，空表示不限制）
+        end_time: ""                   # 结束时间（格式：HH:MM，空表示不限制）
+
+      # 速率限制（任务级别，覆盖全局配置）
       rate_limit:
-        max_bytes_per_second: 52428800    # 50MB/s 总限制
-        max_rows_per_second: 50000        # 总行数限制
-        burst_size: 1000
+        max_bytes_per_second: 52428800      # 最大字节/秒（50MB/s，0表示不限制）
+        max_rows_per_second: 50000          # 最大行数/秒（0表示不限制）
+        burst_size: 1000                    # 突发大小
+
+      # 重试配置（任务级别，覆盖全局配置）
       retry:
-        max_retries: 3
-        initial_delay: "2s"
-        max_delay: "60s"
-        backoff_factor: 2.0
-      column_mapping:          # 全局列映射
+        max_retries: 3                 # [已废弃] 使用 policy.retry.max_attempts
+        initial_delay: "2s"            # [已废弃] 使用 policy.retry.initial_backoff
+        max_delay: "60s"               # [已废弃] 使用 policy.retry.max_backoff
+        backoff_factor: 2.0            # [已废弃] 使用 policy.retry.backoff_multiplier
+
+      # 列映射配置（源列名 -> 目标列名）
+      column_mapping:
         user_id: "id"
         create_time: "created_at"
-      batch_size: 10000        # 批处理大小（按条数攒批）
-      batch_bytes: 0           # 批处理大小（按数据字节数攒批，0表示不启用）例如：314572800 表示300MB
-      batch_interval: "5s"     # 批次间隔时间
-      parallel_tables: 2       # 并行处理表的数量
 
-# 全局策略配置
+      # 批处理设置（任务级别，覆盖全局配置）
+      batch_size: 10000                # 批处理大小（按条数攒批，0表示不限制）
+      batch_bytes: 0                   # 批处理大小（按字节数攒批，0表示不限制）例如：314572800 表示300MB
+      batch_interval: "5s"             # 批次间隔时间（每批次写入后等待时间）
+      parallel_tables: 2               # 并行处理表的数量（1表示串行）
+
+  # 任务2：StarRocks到ClickHouse演示同步
+  - task_id: "sr2ck_demo_001"
+    name: "StarRocks到ClickHouse演示同步"
+    enabled: false                     # 默认禁用
+    priority: 2
+    reader:
+      name: "mysr-1"
+      vendor: "starrocks"
+      protocol: "mysql"
+      database: "test"
+      tables:
+        - "products"
+    writer:
+      name: "myck-1"
+      vendor: "clickhouse"
+      protocol: "http"
+      database: "test"
+      tables:
+        - "products_sync"
+    settings:
+      batch_size: 5000
+      parallel_tables: 1
+
+# ==================== 全局策略配置 ====================
+
 policy:
   # 数据传输策略
   transfer:
-    batch_size: 10000                # 批次大小（按条数攒批，全局默认）
-    batch_bytes: 0                   # 批次大小（按数据字节数攒批，0表示不启用）例如：314572800 表示300MB
-    batch_interval: "5s"             # 批次间隔时间
-    progress_report_every: 10        # 每N批次输出进度
-    progress_report_timeout: "10s"   # 或超过N秒强制输出进度
-    rate_limit_sleep: "10ms"         # 速率控制休眠时间
-    writer_concurrency: 3            # Writer并发数量（新增）
+    progress_report_interval_sec: 10    # 进度日志输出间隔（秒）
+    rate_limit_sleep: "10ms"            # 批次间限速休眠时间
+    writer_concurrency: 3               # Writer并发数量（建议值：1-5）
 
   # 调度策略
   schedule:
-    check_interval: "1m"       # 时间窗口检查间隔
-    retry_interval: "5m"       # 失败重试间隔
-    max_concurrent_task: 2     # 最大并发任务数
+    check_interval: "1m"                # 定时任务扫描间隔（暂未使用）
+    retry_interval: "5m"                # 失败任务重试等待时间
+    retry_times: 3                      # 失败重试次数：0=不重试，-1=无限重试，N=最多重试N次
+    max_concurrent_task: 2              # 最大并发任务数（串行执行时设置为1）
 
   # HTTP客户端策略
   http:
-    timeout: "30s"                   # 请求超时
-    idle_conn_timeout: "60s"         # 空闲连接超时
-    tls_handshake_timeout: "10s"     # TLS握手超时
-    max_idle_conns: 100              # 最大空闲连接数
-    max_conns_per_host: 10           # 每个主机最大连接数
+    timeout: "30s"                      # HTTP请求超时时间
+    idle_conn_timeout: "60s"            # 空闲连接超时时间
+    tls_handshake_timeout: "10s"        # TLS握手超时时间
+    max_idle_conns: 100                 # 最大空闲连接数
+    max_conns_per_host: 10              # 每个主机最大连接数
 
-  # 数据过滤策略
+  # 数据过滤策略（全局配置，任务级可覆盖）
   filter:
-    # 需要排除的列（全局配置，可在任务级别覆盖）
+    # 排除列列表（在所有任务中排除这些列）
     exclude_columns: []
-      # - "requestHeadIps"
-      # - "requestBodyIps"
-      # - "urlDomain"
+      # - "internal_field"
+      # - "temp_column"
 
-    # 固定值列（全局配置，临时方案）
+    # 固定值列映射（将指定列替换为固定值）
     fixed_values: {}
-      # recordTimestamp: 1740924169
+      # sync_timestamp: 1740924169
+      # sync_flag: "manual"
 
-  # 重试策略（全局默认）
+  # 重试策略（统一Reader、Writer、Scheduler的重试策略）
   retry:
-    max_retries: 3
-    initial_delay: "2s"
-    max_delay: "60s"
-    backoff_factor: 2.0
+    max_attempts: 3                     # 最大重试次数（包含首次尝试，即实际重试次数为 max_attempts-1）
+    initial_backoff: "1s"               # 初始退避时间（首次重试等待时间）
+    max_backoff: "60s"                  # 最大退避时间（防止退避时间过长）
+    backoff_multiplier: 2.0             # 退避倍数（指数退避，每次重试等待时间翻倍）
+    jitter: true                        # 随机抖动（在退避时间上±25%随机浮动，避免惊群效应）
 
-# 监控配置
+# ==================== 监控配置 ====================
+
 monitor:
-  enabled: false  # 暂时禁用，因为监控模块还未实现
+  enabled: false                        # 暂未实现，预留配置
   metrics_port: 8080
   metrics_path: "/metrics"
   update_interval: "10s"
   health_check_port: 8081
 
-# 日志配置
-log:
-  level: "info"                # debug, info, warn, error
-  format: "text"               # json, text
-  output: "stdout"             # stdout, file
-  file_path: "/var/log/ck2sr/ck2sr.log"
-  max_size: 100               # MB
-  max_backups: 10
-  max_age: 30                 # days
-  compress: true
+# ==================== 日志配置 ====================
 
-# 服务运行配置
+log:
+  level: "info"                         # 日志级别：debug（调试）, info（生产推荐）, warn（警告）, error（错误）
+  format: "text"                        # 日志格式：text（人类可读）, json（机器解析）
+  output: "stdout"                      # 输出目标：stdout（标准输出）, file（文件）
+  file_path: "/var/log/ck2sr/ck2sr.log" # 日志文件路径（output为file时生效）
+  max_size: 100                         # 单个日志文件最大大小（MB）
+  max_backups: 10                       # 保留的日志文件数量
+  max_age: 30                           # 日志文件保留天数
+  compress: true                        # 是否压缩归档日志
+
+# ==================== 服务运行配置 ====================
+
 service:
-  storage_path: "./data"
-  heartbeat_interval: "30s"
-  graceful_shutdown_timeout: "30s"
-  max_concurrent_tasks: 5
+  storage_path: "./data"                # 状态文件存储路径（任务状态和进度文件）
+  heartbeat_interval: "30s"             # 心跳间隔（暂未使用）
+  graceful_shutdown_timeout: "30s"      # 优雅关闭超时时间
+  max_concurrent_tasks: 5               # [已废弃] 使用 policy.schedule.max_concurrent_task
