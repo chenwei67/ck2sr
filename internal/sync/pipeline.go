@@ -58,7 +58,7 @@ type ProgressInfo struct {
 	Table         string
 	Offset        int64
 	ProcessedRows int64
-	BatchCount    int
+	BatchCount    int64
 }
 
 // NewPipeline 创建新的异步Pipeline
@@ -104,7 +104,7 @@ func (p *Pipeline) Initialize(ctx context.Context, offset int64) error {
 	writerFactory := writer.NewWriterFactory()
 
 	var err error
-	p.reader, err = readerFactory.CreateExecutable(&p.config.Reader, p.ckClientMgr, p.srClientMgr)
+	p.reader, err = readerFactory.CreateExecutable(&p.config.Reader, p.ckClientMgr, p.srClientMgr, p.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create reader: %w", err)
 	}
@@ -183,7 +183,6 @@ func (p *Pipeline) Process(ctx context.Context, table string) error {
 	}
 
 	// 启动进度监控goroutine
-	p.wg.Add(1)
 	go p.progressMonitor(ctx, table)
 
 	// 主读取循环
@@ -192,7 +191,6 @@ func (p *Pipeline) Process(ctx context.Context, table string) error {
 		p.logger.Errorf("Reader error: %v", err)
 		return err
 	}
-
 	// 关闭数据通道，等待writers完成
 	close(p.dataChan)
 	p.wg.Wait()
@@ -401,6 +399,10 @@ func (p *Pipeline) writerWorker(ctx context.Context, workerID int) {
 				// 进度通道已满，丢弃进度信息
 			}
 
+			// 批处理间隔
+			if p.config.Settings.BatchInterval > 0 {
+				time.Sleep(p.config.Settings.BatchInterval)
+			}
 		case <-ctx.Done():
 			p.logger.Debugf("Writer worker %d: context cancelled", workerID)
 			return
@@ -437,44 +439,13 @@ func (p *Pipeline) processBatch(ctx context.Context, batch DataBatch, workerID i
 
 // progressMonitor 监控进度并定期输出
 func (p *Pipeline) progressMonitor(ctx context.Context, table string) {
-	defer p.wg.Done()
-
-	ticker := time.NewTicker(time.Duration(p.policy.Transfer.ProgressReportIntervalSec) * time.Second)
-	defer ticker.Stop()
-
-	lastReportTime := time.Now()
-	lastProcessedRows := int64(0)
-	lastProcessedBytes := int64(0)
-
 	for {
 		select {
 		case progress := <-p.progressChan:
-			// 调用进度回调函数（如果已设置）
+			// 调用进度回调函数（如果已设置），实时输出和保存同步进度
 			if p.progressCallback != nil {
 				p.progressCallback(progress)
 			}
-
-		case <-ticker.C:
-			// 定期报告进度
-			stats := p.getStats()
-			currentTime := time.Now()
-			duration := currentTime.Sub(lastReportTime)
-			rowsProcessed := stats.TotalRows - lastProcessedRows
-			bytesProcessed := stats.TotalBytes - lastProcessedBytes
-
-			if rowsProcessed > 0 || bytesProcessed > 0 {
-				rowsPerSecond := float64(rowsProcessed) / duration.Seconds()
-				bytesPerSecond := float64(bytesProcessed) / duration.Seconds()
-
-				p.logger.Infof("Progress [%s]: %d batches, %d rows, %.2f rows/sec, %s, %.2f MB/sec",
-					table, stats.BatchCount, stats.TotalRows, rowsPerSecond,
-					utils.FormatBytes(stats.TotalBytes), bytesPerSecond/1024/1024)
-			}
-
-			lastReportTime = currentTime
-			lastProcessedRows = stats.TotalRows
-			lastProcessedBytes = stats.TotalBytes
-
 		case <-ctx.Done():
 			p.logger.Debugf("Progress monitor stopped for table %s", table)
 			return

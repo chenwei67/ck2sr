@@ -31,7 +31,6 @@ type SyncTask struct {
 	policy  *config.PolicyConfig
 	storage storage.Storage
 	logger  *logrus.Logger
-	monitor *Monitor
 	status  TaskStatus
 
 	// 客户端
@@ -64,7 +63,6 @@ func NewSyncTask(cfg *config.SyncTaskConfig,
 		ckCliMgr: ckCliMgr,
 		srCliMgr: srCliMgr,
 		logger:   logger,
-		monitor:  NewMonitor(cfg.TaskID, logger),
 		status:   TaskStatusIdle,
 		jobs:     make(map[string]TableSyncJob),
 		ctx:      ctx,
@@ -189,23 +187,38 @@ func (t *SyncTask) GetAllTableProgress() map[string]*TableSyncProgress {
 func (t *SyncTask) logSummaryStats(successCount, totalTables int) {
 	var totalRows, totalBytes int64
 	var totalDuration time.Duration
+	// 同步记录最晚结束时间和最早的开始时间来统计总耗时
+	var earliestStart, latestEnd time.Time
 
 	t.jobsMu.RLock()
 	for _, job := range t.jobs {
 		stats := job.GetStats()
 		totalRows += stats.ProcessedRows
 		totalBytes += stats.ProcessedBytes
-		if !stats.EndTime.IsZero() && !stats.StartTime.IsZero() {
-			totalDuration += stats.EndTime.Sub(stats.StartTime)
+		if stats.StartTime.Before(earliestStart) || earliestStart.IsZero() {
+			earliestStart = stats.StartTime
+		}
+		if stats.EndTime.After(latestEnd) || latestEnd.IsZero() {
+			latestEnd = stats.EndTime
 		}
 	}
 	t.jobsMu.RUnlock()
 
+	// 计算总耗时
+	totalDuration = latestEnd.Sub(earliestStart)
+
 	t.logger.Infof("=== Task Summary ===")
+	t.logger.Infof("  Task ID: %s", t.config.TaskID)
+	t.logger.Infof("  Task Name: %s", t.config.Name)
 	t.logger.Infof("  Success Rate: %d/%d tables", successCount, totalTables)
-	t.logger.Infof("  Total Rows: %d", totalRows)
-	t.logger.Infof("  Total Bytes: %d", totalBytes)
+	t.logger.Infof("  Total sync Rows: %d", totalRows)
+	t.logger.Infof("  Total sync Bytes: %d", totalBytes)
 	t.logger.Infof("  Total Duration: %v", totalDuration)
+	if totalDuration.Seconds() > 0 {
+		rowsPerSec := float64(totalRows) / totalDuration.Seconds()
+		bytesPerSec := float64(totalBytes) / totalDuration.Seconds()
+		t.logger.Infof("  Performance: %.2f rows/sec, %.2f bytes/sec", rowsPerSec, bytesPerSec)
+	}
 }
 
 func (t *SyncTask) Execute(ctx context.Context) error {
@@ -215,18 +228,12 @@ func (t *SyncTask) Execute(ctx context.Context) error {
 	}
 
 	t.status = TaskStatusRunning
-	t.monitor.Start()
 	defer func() {
-		t.monitor.End()
 		t.status = TaskStatusCompleted
 	}()
 
 	t.logger.Infof("Starting sync task: %s", t.config.TaskID)
 	t.logTaskConfiguration()
-
-	// 创建带超时的执行上下文
-	execCtx, execCancel := context.WithCancel(ctx)
-	defer execCancel()
 
 	// 并发执行表同步作业
 	errChan := make(chan error, len(t.jobs))
@@ -255,33 +262,18 @@ func (t *SyncTask) Execute(ctx context.Context) error {
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			t.logger.Infof("Starting sync for table: %s", table)
+			// 创建带超时的执行上下文
+			execCtx, execCancel := context.WithCancel(ctx)
+			defer execCancel()
 
-			// 异步执行表同步
+			// 执行表同步
 			if err := syncJob.Start(execCtx); err != nil {
-				t.logger.Errorf("Failed to sync table %s: %v", table, err)
-				t.monitor.SetTableError(table, err)
+				t.logger.Errorf("Failed to start sync for table %s: %v", table, err)
 				errChan <- fmt.Errorf("table %s: %w", table, err)
+				return
 			}
-
-			// 轮询获取执行结果
-			ticker := time.NewTicker(5 * time.Second) //TODO: 可配置
-			defer ticker.Stop()
-			for range ticker.C {
-				if execCtx.Err() != nil {
-					t.logger.Warnf("Execution context cancelled for table %s", table)
-					return
-				}
-				progress := syncJob.GetProgress()
-				if progress != nil && progress.Status == "completed" {
-					errChan <- nil
-					t.logger.Infof("Successfully completed sync for table: %s", table)
-					return
-				} else if progress != nil && progress.Status == "failed" {
-					errChan <- fmt.Errorf("table %s sync failed", table)
-					return
-				}
-			}
+			// 同步成功需要返回 nil
+			errChan <- nil
 		}(tableName, job)
 	}
 
@@ -331,10 +323,8 @@ func (t *SyncTask) logTaskConfiguration() {
 	t.logger.Infof("  Tables: %v", t.config.Reader.Tables)
 	t.logger.Infof("  Batch Size: %d", t.config.Settings.BatchSize)
 	t.logger.Infof("  Batch Bytes: %d", t.config.Settings.BatchBytes)
+	t.logger.Infof("  Batch Interval: %v", t.config.Settings.BatchInterval)
 	t.logger.Infof("  Parallel Tables: %d", t.config.Settings.ParallelTables)
-	if t.config.Settings.BatchInterval > 0 {
-		t.logger.Infof("  Batch Interval: %v", t.config.Settings.BatchInterval)
-	}
 	if t.config.Settings.DataRange.StartTime != "" || t.config.Settings.DataRange.EndTime != "" {
 		t.logger.Infof("  Data Range: %s - %s",
 			t.config.Settings.DataRange.StartTime, t.config.Settings.DataRange.EndTime)

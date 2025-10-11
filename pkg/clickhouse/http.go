@@ -96,6 +96,44 @@ func (c *HTTPClient) Execute(ctx context.Context, query string) error {
 	return nil
 }
 
+// Insert 使用JSONEachRow格式插入数据
+// database: 数据库名
+// table: 表名
+// data: JSON格式的数据（每行一个JSON对象）
+func (c *HTTPClient) Insert(ctx context.Context, database, table string, data io.Reader) error {
+	query := fmt.Sprintf("INSERT INTO %s.%s FORMAT JSONEachRow", database, table)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL, data)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// 设置查询参数
+	q := req.URL.Query()
+	q.Add("query", query)
+	req.URL.RawQuery = q.Encode()
+
+	// 设置认证
+	if c.config.Username != "" {
+		req.SetBasicAuth(c.config.Username, c.config.Password)
+	}
+
+	req.Header.Set("Content-Type", "application/x-ndjson")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to execute insert: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
+	}
+
+	return nil
+}
+
 // Close 关闭客户端
 func (c *HTTPClient) Close() error {
 	if c.httpClient != nil {

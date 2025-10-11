@@ -62,7 +62,7 @@ func (f *DefaultWriterFactory) createClickHouseWriter(cfg *config.DataSourceConf
 		if err != nil {
 			return nil, fmt.Errorf("failed to get ClickHouse %s HTTP client: %w", cfg.Name, err)
 		}
-		return NewClickHouseHTTPWriter(cfg, cli)
+		return NewClickHouseHTTPWriter(cfg, cli, logger)
 	case "mysql":
 		cli, err := ckCliMgr.GetMySQLClient(cfg.Name)
 		if err != nil {

@@ -30,11 +30,11 @@ type SchedulePolicyConfig struct {
 
 // HTTPPolicyConfig HTTP策略配置
 type HTTPPolicyConfig struct {
-	Timeout            time.Duration `yaml:"timeout"`
-	IdleConnTimeout    time.Duration `yaml:"idle_conn_timeout"`
+	Timeout             time.Duration `yaml:"timeout"`
+	IdleConnTimeout     time.Duration `yaml:"idle_conn_timeout"`
 	TLSHandshakeTimeout time.Duration `yaml:"tls_handshake_timeout"`
-	MaxIdleConns       int           `yaml:"max_idle_conns"`
-	MaxConnsPerHost    int           `yaml:"max_conns_per_host"`
+	MaxIdleConns        int           `yaml:"max_idle_conns"`
+	MaxConnsPerHost     int           `yaml:"max_conns_per_host"`
 }
 
 // FilterPolicyConfig 过滤策略配置
@@ -45,26 +45,26 @@ type FilterPolicyConfig struct {
 
 // RetryPolicyConfig 重试策略配置（统一Reader、Writer、Scheduler的重试策略）
 type RetryPolicyConfig struct {
-	MaxAttempts        int           `yaml:"max_attempts"`        // 最大重试次数
-	InitialBackoff     time.Duration `yaml:"initial_backoff"`     // 初始退避时间
-	MaxBackoff         time.Duration `yaml:"max_backoff"`         // 最大退避时间
-	BackoffMultiplier  float64       `yaml:"backoff_multiplier"`  // 退避倍数（指数退避）
-	Jitter             bool          `yaml:"jitter"`              // 随机抖动，避免惊群效应
+	MaxAttempts       int           `yaml:"max_attempts"`       // 最大重试次数
+	InitialBackoff    time.Duration `yaml:"initial_backoff"`    // 初始退避时间
+	MaxBackoff        time.Duration `yaml:"max_backoff"`        // 最大退避时间
+	BackoffMultiplier float64       `yaml:"backoff_multiplier"` // 退避倍数（指数退避）
+	Jitter            bool          `yaml:"jitter"`             // 随机抖动，避免惊群效应
 }
 
 // DefaultPolicyConfig 默认策略配置
 func DefaultPolicyConfig() *PolicyConfig {
 	return &PolicyConfig{
 		Transfer: TransferPolicyConfig{
-			ProgressReportIntervalSec: 10,                      // 每10秒输出一次进度
-			RateLimitSleep:            1 * time.Millisecond,    // 1ms限速
-			WriterConcurrency:         1,                       // 默认1个并发Writer
+			ProgressReportIntervalSec: 10,                   // 每10秒输出一次进度
+			RateLimitSleep:            1 * time.Millisecond, // 1ms限速
+			WriterConcurrency:         1,                    // 默认1个并发Writer
 		},
 		Schedule: SchedulePolicyConfig{
-			CheckInterval:     10 * time.Second,                // 每10秒检查一次
-			RetryInterval:     10 * time.Second,                // 失败后10秒重试
-			RetryTimes:        3,                               // 最多重试3次
-			MaxConcurrentTask: 1,                               // 默认1个并发任务
+			CheckInterval:     10 * time.Second, // 每10秒检查一次
+			RetryInterval:     10 * time.Second, // 失败后10秒重试
+			RetryTimes:        3,                // 最多重试3次
+			MaxConcurrentTask: 1,                // 默认1个并发任务
 		},
 		HTTP: HTTPPolicyConfig{
 			Timeout:             30 * time.Second,
@@ -78,11 +78,11 @@ func DefaultPolicyConfig() *PolicyConfig {
 			FixedValues:    map[string]interface{}{},
 		},
 		Retry: RetryPolicyConfig{
-			MaxAttempts:       3,                               // 最多重试3次
-			InitialBackoff:    1 * time.Second,                 // 初始1秒退避
-			MaxBackoff:        60 * time.Second,                // 最大60秒退避
-			BackoffMultiplier: 2.0,                             // 指数退避倍数2.0
-			Jitter:            true,                            // 启用随机抖动
+			MaxAttempts:       3,                // 最多重试3次
+			InitialBackoff:    1 * time.Second,  // 初始1秒退避
+			MaxBackoff:        60 * time.Second, // 最大60秒退避
+			BackoffMultiplier: 2.0,              // 指数退避倍数2.0
+			Jitter:            true,             // 启用随机抖动
 		},
 	}
 }

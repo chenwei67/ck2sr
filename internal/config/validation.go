@@ -267,13 +267,15 @@ func validateDataSource(source *DataSourceConfig, sourceType string, allDBNames 
 
 // validateSyncSettings 验证同步设置
 func validateSyncSettings(settings *SyncSettingsConfig, taskID string) error {
-	if settings.BatchSize <= 0 {
+	if settings.BatchSize < 0 {
 		return fmt.Errorf("task %s: batch_size must be positive", taskID)
 	}
+	if settings.BatchBytes < 0 {
+		return fmt.Errorf("task %s: batch_bytes must be positive", taskID)
+	}
 
-	// 设置BatchInterval默认值为5秒
-	if settings.BatchInterval <= 0 {
-		settings.BatchInterval = 5 * time.Second
+	if settings.BatchInterval < 0 {
+		return fmt.Errorf("task %s: batch_interval must be positive", taskID)
 	}
 
 	if settings.ParallelTables <= 0 {

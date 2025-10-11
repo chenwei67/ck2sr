@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -36,7 +37,6 @@ type Scheduler struct {
 	mu      sync.RWMutex
 	stopCh  chan struct{}
 	wg      sync.WaitGroup
-	once    sync.Once
 
 	// 两阶段调度相关
 	phase1Complete bool             // Phase 1 是否完成
@@ -161,6 +161,9 @@ func (s *Scheduler) executePhase1(ctx context.Context) error {
 			s.resultsMu.Unlock()
 		} else if state.Status == storage.TaskStatusFailed {
 			s.logger.Infof("Phase 1: Task %s previously failed, will retry in Phase 2", taskID)
+			s.resultsMu.Lock()
+			s.taskResults[taskID] = fmt.Errorf("previously failed") // 标记为失败，等待Phase 2重试
+			s.resultsMu.Unlock()
 		}
 	}
 
@@ -208,7 +211,7 @@ func (s *Scheduler) executePhase2(ctx context.Context) error {
 	// -1表示无限重试，用一个大数字代替
 	maxRetries := retryTimes
 	if retryTimes == -1 {
-		maxRetries = 1000000 // 实际上是无限重试
+		maxRetries = math.MaxInt64 // 实际上是无限重试
 	}
 
 	for attempt := 0; attempt < maxRetries; attempt++ {

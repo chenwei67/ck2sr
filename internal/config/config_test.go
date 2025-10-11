@@ -255,9 +255,6 @@ sync_tasks:
 	if cfg.Monitor.Enabled != false {
 		t.Error("Expected monitor to be disabled")
 	}
-	if cfg.Service.MaxConcurrentTasks != 5 {
-		t.Errorf("Expected service max concurrent tasks 5, got %d", cfg.Service.MaxConcurrentTasks)
-	}
 }
 
 // TestLoadNonExistentFile 测试加载不存在的文件

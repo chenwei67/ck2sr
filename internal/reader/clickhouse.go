@@ -28,9 +28,7 @@ type ClickHouseMySQLReader struct {
 }
 
 // NewClickHouseMySQLReader 创建新的ClickHouse MySQL读取器
-func NewClickHouseMySQLReader(cfg *config.DataSourceConfig, cli *clickhouse.MySQLClient) (*ClickHouseMySQLReader, error) {
-	logger := logrus.New()
-
+func NewClickHouseMySQLReader(cfg *config.DataSourceConfig, cli *clickhouse.MySQLClient, logger *logrus.Logger) (*ClickHouseMySQLReader, error) {
 	reader := &ClickHouseMySQLReader{
 		config:         cfg,
 		logger:         logger,
@@ -282,9 +280,7 @@ type ClickHouseHTTPReader struct {
 	logger *logrus.Logger
 }
 
-func NewClickHouseHTTPReader(cfg *config.DataSourceConfig, cli *clickhouse.HTTPClient) (*ClickHouseHTTPReader, error) {
-	logger := logrus.New()
-
+func NewClickHouseHTTPReader(cfg *config.DataSourceConfig, cli *clickhouse.HTTPClient, logger *logrus.Logger) (*ClickHouseHTTPReader, error) {
 	reader := &ClickHouseHTTPReader{
 		config: cfg,
 		ctx:    context.Background(),

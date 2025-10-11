@@ -3,7 +3,6 @@ package sync
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -34,14 +33,15 @@ type TableSyncJob interface {
 
 // TableSyncProgress 表同步进度
 type TableSyncProgress struct {
-	TaskID         string    `json:"task_id"`         // 所属任务ID
-	TableName      string    `json:"table_name"`      // 表名
-	Offset         int64     `json:"offset"`          // 当前偏移量
-	TotalRows      int64     `json:"total_rows"`      // 总行数（估算）
-	ProcessedRows  int64     `json:"processed_rows"`  // 已处理行数
-	ProcessedBytes int64     `json:"processed_bytes"` // 已处理字节数
-	LastSyncTime   time.Time `json:"last_sync_time"`  // 最后同步时间
-	Status         string    `json:"status"`          // 同步状态: pending, running, completed, failed
+	TaskID           string    `json:"task_id"`           // 所属任务ID
+	TableName        string    `json:"table_name"`        // 表名
+	Offset           int64     `json:"offset"`            // 当前偏移量
+	TotalRows        int64     `json:"total_rows"`        // 总行数（估算）
+	ProcessedBatches int64     `json:"processed_batches"` // 已处理批次数
+	ProcessedRows    int64     `json:"processed_rows"`    // 已处理行数
+	ProcessedBytes   int64     `json:"processed_bytes"`   // 已处理字节数
+	LastSyncTime     time.Time `json:"last_sync_time"`    // 最后同步时间
+	Status           string    `json:"status"`            // 同步状态: pending, running, completed, failed
 }
 
 // TableSyncStats 表同步统计
@@ -70,9 +70,9 @@ type DefaultTableSyncJob struct {
 	pipeline  *Pipeline                // 数据管道
 	progress  *TableSyncProgress       // 同步进度
 	stats     *TableSyncStats          // 统计信息
-	mu        sync.RWMutex             // 读写锁
-	ctx       context.Context          // 上下文
-	cancel    context.CancelFunc       // 取消函数
+	// mu        sync.RWMutex             // 读写锁，是想保护哪个数据？
+	ctx    context.Context    // 上下文
+	cancel context.CancelFunc // 取消函数
 }
 
 // NewTableSyncJob 创建新的表同步作业
@@ -129,13 +129,10 @@ func (j *DefaultTableSyncJob) GetTableName() string {
 
 // Start 启动表同步作业
 func (j *DefaultTableSyncJob) Start(ctx context.Context) error {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-
 	// 创建带取消的上下文
 	j.ctx, j.cancel = context.WithCancel(ctx)
 
-	j.logger.Infof("Starting table sync job for %s", j.tableName)
+	j.logger.Infof("Starting sync job for table: %s", j.tableName)
 
 	// 更新状态为运行中
 	j.progress.Status = "running"
@@ -161,12 +158,18 @@ func (j *DefaultTableSyncJob) Start(ctx context.Context) error {
 		if j.progress.Status == "completed" || (j.progress.TotalRows > 0 && j.progress.ProcessedRows >= j.progress.TotalRows) {
 			j.logger.Infof("Table %s already completed (processed_rows=%d, total_rows=%d, status=%s), skipping resync",
 				j.tableName, j.progress.ProcessedRows, j.progress.TotalRows, j.progress.Status)
+			// 确保状态设置为 completed（同步操作，不使用 goroutine）
+			j.progress.Status = "completed"
 			j.stats.Status = "completed"
-			j.mu.Unlock() // 释放锁
-			// 在goroutine中立即返回成功
-			go func() {
-				j.handleSuccess()
-			}()
+			if j.stats.EndTime.IsZero() {
+				j.stats.EndTime = time.Now()
+				j.stats.Duration = j.stats.EndTime.Sub(j.stats.StartTime)
+			}
+			// 保存最终状态（同步操作）
+			if err := j.saveProgress(); err != nil {
+				j.logger.Warnf("Failed to save completed status for table %s: %v", j.tableName, err)
+			}
+			j.logger.Infof("Table %s status already completed, no sync needed", j.tableName)
 			return nil
 		}
 	}
@@ -201,31 +204,22 @@ func (j *DefaultTableSyncJob) Start(ctx context.Context) error {
 		}
 	}
 
-	// 在独立的goroutine中执行同步
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				j.logger.Errorf("Table sync job panic for %s: %v", j.tableName, r)
-				j.handleError(fmt.Errorf("panic: %v", r))
-			}
-		}()
+	// 启动同步过程（同步操作，不使用 goroutine）
+	if err := j.syncTable(); err != nil {
+		j.logger.Errorf("Failed sync job for table %s: %v", j.tableName, err)
+		j.handleError(err)
+		return err
+	} else {
+		j.handleSuccess()
+	}
 
-		if err := j.syncTable(); err != nil {
-			j.logger.Errorf("Table sync failed for %s: %v", j.tableName, err)
-			j.handleError(err)
-		} else {
-			j.handleSuccess()
-		}
-	}()
-
+	// 同步成功
+	j.logger.Infof("Success sync job for table: %s", j.tableName)
 	return nil
 }
 
 // Stop 停止表同步作业
 func (j *DefaultTableSyncJob) Stop() error {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-
 	if j.cancel != nil {
 		j.logger.Infof("Stopping table sync job for %s", j.tableName)
 		j.cancel()
@@ -236,9 +230,6 @@ func (j *DefaultTableSyncJob) Stop() error {
 
 // GetProgress 获取同步进度
 func (j *DefaultTableSyncJob) GetProgress() *TableSyncProgress {
-	j.mu.RLock()
-	defer j.mu.RUnlock()
-
 	// 创建副本以避免并发访问问题
 	progress := *j.progress
 	return &progress
@@ -246,9 +237,6 @@ func (j *DefaultTableSyncJob) GetProgress() *TableSyncProgress {
 
 // GetStats 获取统计信息
 func (j *DefaultTableSyncJob) GetStats() *TableSyncStats {
-	j.mu.RLock()
-	defer j.mu.RUnlock()
-
 	// 创建副本并计算当前持续时间
 	stats := *j.stats
 	if !stats.StartTime.IsZero() && stats.Status == "running" {
@@ -302,9 +290,9 @@ func (j *DefaultTableSyncJob) queryTotalRows() (int64, error) {
 func (j *DefaultTableSyncJob) saveInitialProgress() error {
 	syncProgress := &storage.SyncProgress{
 		TaskID:        j.taskID,
-		SourceDB:      j.config.Reader.Database,  // 源数据库
+		SourceDB:      j.config.Reader.Database, // 源数据库
 		SourceTable:   j.tableName,
-		TargetDB:      j.config.Writer.Database,  // 目标数据库
+		TargetDB:      j.config.Writer.Database, // 目标数据库
 		TargetTable:   j.dstTable,
 		TotalRows:     j.progress.TotalRows,
 		SyncedRows:    0, // 初始时未同步任何数据
@@ -361,9 +349,9 @@ func (j *DefaultTableSyncJob) saveProgress() error {
 
 	syncProgress := &storage.SyncProgress{
 		TaskID:        j.taskID,
-		SourceDB:      j.config.Reader.Database,  // 源数据库
+		SourceDB:      j.config.Reader.Database, // 源数据库
 		SourceTable:   j.tableName,
-		TargetDB:      j.config.Writer.Database,  // 目标数据库
+		TargetDB:      j.config.Writer.Database, // 目标数据库
 		TargetTable:   j.dstTable,
 		TotalRows:     j.progress.TotalRows,
 		SyncedRows:    j.progress.ProcessedRows,
@@ -379,16 +367,15 @@ func (j *DefaultTableSyncJob) saveProgress() error {
 // onBatchProgress 批次进度回调函数
 // 每次批次写入完成后被Pipeline调用，更新并保存进度
 func (j *DefaultTableSyncJob) onBatchProgress(progress ProgressInfo) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-
 	// 更新进度信息
 	j.progress.ProcessedRows += progress.ProcessedRows
+	j.progress.ProcessedBatches += progress.BatchCount
 	j.progress.LastSyncTime = time.Now()
 
 	// 获取Pipeline最新统计信息以更新字节数
 	pipelineStats := j.pipeline.GetStats()
 	j.stats.ProcessedBytes = pipelineStats.TotalBytes
+	j.stats.ProcessedRows = pipelineStats.TotalRows
 
 	// 输出增强的进度日志（包含总行数、字节数、速率）
 	elapsed := time.Since(j.stats.StartTime).Seconds()
@@ -400,12 +387,12 @@ func (j *DefaultTableSyncJob) onBatchProgress(progress ProgressInfo) {
 			// 有总行数时，显示进度百分比
 			progressPct := float64(j.progress.ProcessedRows) * 100.0 / float64(j.progress.TotalRows)
 			j.logger.Infof("Progress [%s]: %d batches, %d/%d rows (%.1f%%), %.2f rows/sec, %s, %.2f MB/sec",
-				j.tableName, progress.BatchCount, j.progress.ProcessedRows, j.progress.TotalRows,
+				j.tableName, j.progress.ProcessedBatches, j.progress.ProcessedRows, j.progress.TotalRows,
 				progressPct, rowsPerSec, utils.FormatBytes(j.stats.ProcessedBytes), bytesPerSec/1024/1024)
 		} else {
 			// 无总行数时，只显示已处理数量
 			j.logger.Infof("Progress [%s]: %d batches, %d rows, %.2f rows/sec, %s, %.2f MB/sec",
-				j.tableName, progress.BatchCount, j.progress.ProcessedRows,
+				j.tableName, j.progress.ProcessedBatches, j.progress.ProcessedRows,
 				rowsPerSec, utils.FormatBytes(j.stats.ProcessedBytes), bytesPerSec/1024/1024)
 		}
 	}
@@ -413,9 +400,9 @@ func (j *DefaultTableSyncJob) onBatchProgress(progress ProgressInfo) {
 	// 创建进度数据快照，避免在异步保存时出现竞态条件
 	progressSnapshot := &storage.SyncProgress{
 		TaskID:        j.taskID,
-		SourceDB:      j.config.Reader.Database,  // 源数据库
+		SourceDB:      j.config.Reader.Database, // 源数据库
 		SourceTable:   j.tableName,
-		TargetDB:      j.config.Writer.Database,  // 目标数据库
+		TargetDB:      j.config.Writer.Database, // 目标数据库
 		TargetTable:   j.dstTable,
 		TotalRows:     j.progress.TotalRows,
 		SyncedRows:    j.progress.ProcessedRows,
@@ -441,22 +428,9 @@ func (j *DefaultTableSyncJob) onBatchProgress(progress ProgressInfo) {
 func (j *DefaultTableSyncJob) syncTable() error {
 	j.logger.Infof("Starting table synchronization for %s from offset %d", j.tableName, j.progress.Offset)
 
-	// 使用Pipeline处理表数据（传入当前offset支持后续优化）
+	// 使用Pipeline处理表数据
 	if err := j.pipeline.Process(j.ctx, j.tableName); err != nil {
 		return fmt.Errorf("pipeline processing failed: %w", err)
-	}
-
-	// 获取Pipeline的统计信息并更新本地统计
-	pipelineStats := j.pipeline.GetStats()
-	j.mu.Lock()
-	j.stats.ProcessedRows = pipelineStats.TotalRows
-	j.stats.ProcessedBytes = pipelineStats.TotalBytes
-	j.progress.ProcessedRows += pipelineStats.TotalRows
-	j.mu.Unlock()
-
-	// 定期保存进度
-	if err := j.saveProgress(); err != nil {
-		j.logger.Warnf("Failed to save progress for table %s: %v", j.tableName, err)
 	}
 
 	j.logger.Infof("Table synchronization completed for %s, processed %d rows",
@@ -467,38 +441,32 @@ func (j *DefaultTableSyncJob) syncTable() error {
 
 // handleError 处理同步错误
 func (j *DefaultTableSyncJob) handleError(err error) {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-
 	j.progress.Status = "failed"
 	j.stats.Status = "failed"
 	j.stats.EndTime = time.Now()
 	j.stats.Duration = j.stats.EndTime.Sub(j.stats.StartTime)
 	j.stats.ErrorCount++
 
-	// 尝试保存错误状态
-	if saveErr := j.saveProgress(); saveErr != nil {
-		j.logger.Errorf("Failed to save error progress for table %s: %v", j.tableName, saveErr)
-	}
+	// TODO：这里为何还需要更新进度状态？进度状态已经在回调函数onBatchProgress中完成了更新
+	// if saveErr := j.saveProgress(); saveErr != nil {
+	// 	j.logger.Errorf("Failed to save error progress for table %s: %v", j.tableName, saveErr)
+	// }
 
 	j.logger.Errorf("Table sync job failed for %s: %v", j.tableName, err)
 }
 
 // handleSuccess 处理同步成功
 func (j *DefaultTableSyncJob) handleSuccess() {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-
 	j.progress.Status = "completed"
 	j.progress.LastSyncTime = time.Now()
 	j.stats.Status = "completed"
 	j.stats.EndTime = time.Now()
 	j.stats.Duration = j.stats.EndTime.Sub(j.stats.StartTime)
 
-	// 保存最终进度
-	if err := j.saveProgress(); err != nil {
-		j.logger.Errorf("Failed to save final progress for table %s: %v", j.tableName, err)
-	}
+	// TODO：这里为何还需要更新进度状态？进度状态已经在回调函数onBatchProgress中完成了更新
+	// if err := j.saveProgress(); err != nil {
+	// 	j.logger.Errorf("Failed to save final progress for table %s: %v", j.tableName, err)
+	// }
 
 	j.logger.Infof("Table sync job completed successfully for %s in %v, processed %d rows, %d bytes",
 		j.tableName, j.stats.Duration, j.stats.ProcessedRows, j.stats.ProcessedBytes)

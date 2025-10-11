@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/sirupsen/logrus"
 	"github.com/sunkaimr/ck2sr/internal/client"
 	"github.com/sunkaimr/ck2sr/internal/config"
 	"github.com/sunkaimr/ck2sr/pkg/protocol"
@@ -18,7 +19,7 @@ type ExecutableReader interface {
 }
 
 type ReaderFactory interface {
-	CreateExecutable(config *config.DataSourceConfig, ckCliMgr *client.ClickHouseCliMgr, srCliMgr *client.StarRocksCliMgr) (ExecutableReader, error)
+	CreateExecutable(config *config.DataSourceConfig, ckCliMgr *client.ClickHouseCliMgr, srCliMgr *client.StarRocksCliMgr, logger *logrus.Logger) (ExecutableReader, error)
 }
 
 type DefaultReaderFactory struct{}
@@ -27,54 +28,54 @@ func NewReaderFactory() ReaderFactory {
 	return &DefaultReaderFactory{}
 }
 
-func (f *DefaultReaderFactory) Create(cfg *config.DataSourceConfig, ckCliMgr *client.ClickHouseCliMgr, srCliMgr *client.StarRocksCliMgr) (ExecutableReader, error) {
-	return f.CreateExecutable(cfg, ckCliMgr, srCliMgr)
+func (f *DefaultReaderFactory) Create(cfg *config.DataSourceConfig, ckCliMgr *client.ClickHouseCliMgr, srCliMgr *client.StarRocksCliMgr, logger *logrus.Logger) (ExecutableReader, error) {
+	return f.CreateExecutable(cfg, ckCliMgr, srCliMgr, logger)
 }
 
-func (f *DefaultReaderFactory) CreateExecutable(cfg *config.DataSourceConfig, ckCliMgr *client.ClickHouseCliMgr, srCliMgr *client.StarRocksCliMgr) (ExecutableReader, error) {
+func (f *DefaultReaderFactory) CreateExecutable(cfg *config.DataSourceConfig, ckCliMgr *client.ClickHouseCliMgr, srCliMgr *client.StarRocksCliMgr, logger *logrus.Logger) (ExecutableReader, error) {
 	switch cfg.Vendor {
 	case "clickhouse":
-		return f.createClickHouseReader(cfg, ckCliMgr)
+		return f.createClickHouseReader(cfg, ckCliMgr, logger)
 	case "starrocks":
-		return f.createStarRocksReader(cfg, srCliMgr)
+		return f.createStarRocksReader(cfg, srCliMgr, logger)
 	default:
 		return nil, fmt.Errorf("unsupported vendor: %s", cfg.Vendor)
 	}
 }
 
-func (f *DefaultReaderFactory) createClickHouseReader(cfg *config.DataSourceConfig, ckCliMgr *client.ClickHouseCliMgr) (ExecutableReader, error) {
+func (f *DefaultReaderFactory) createClickHouseReader(cfg *config.DataSourceConfig, ckCliMgr *client.ClickHouseCliMgr, logger *logrus.Logger) (ExecutableReader, error) {
 	switch cfg.Protocol {
 	case "mysql":
 		cli, err := ckCliMgr.GetMySQLClient(cfg.Name)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get ClickHouse %s MySQL client: %w", cfg.Name, err)
 		}
-		return NewClickHouseMySQLReader(cfg, cli)
+		return NewClickHouseMySQLReader(cfg, cli, logger)
 	case "http":
 		cli, err := ckCliMgr.GetHTTPClient(cfg.Name)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get ClickHouse %s HTTP client: %w", cfg.Name, err)
 		}
-		return NewClickHouseHTTPReader(cfg, cli)
+		return NewClickHouseHTTPReader(cfg, cli, logger)
 	default:
 		return nil, fmt.Errorf("unsupported clickhouse protocol: %s", cfg.Protocol)
 	}
 }
 
-func (f *DefaultReaderFactory) createStarRocksReader(cfg *config.DataSourceConfig, srCliMgr *client.StarRocksCliMgr) (ExecutableReader, error) {
+func (f *DefaultReaderFactory) createStarRocksReader(cfg *config.DataSourceConfig, srCliMgr *client.StarRocksCliMgr, logger *logrus.Logger) (ExecutableReader, error) {
 	switch cfg.Protocol {
 	case "mysql":
 		cli, err := srCliMgr.GetMySQLClient(cfg.Name)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get StarRocks %s MySQL client: %w", cfg.Name, err)
 		}
-		return NewStarRocksMySQLReader(cfg, cli)
+		return NewStarRocksMySQLReader(cfg, cli, logger)
 	case "flightsql":
 		cli, err := srCliMgr.GetFlightSQLClient(cfg.Name)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get StarRocks %s FlightSQL client: %w", cfg.Name, err)
 		}
-		return NewStarRocksFlightSQLReader(cfg, cli)
+		return NewStarRocksFlightSQLReader(cfg, cli, logger)
 	default:
 		return nil, fmt.Errorf("unsupported starrocks protocol: %s", cfg.Protocol)
 	}
