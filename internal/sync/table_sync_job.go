@@ -271,15 +271,22 @@ func (j *DefaultTableSyncJob) queryTotalRows() (int64, error) {
 	// 根据reader的协议类型选择合适的客户端执行COUNT查询
 	switch j.config.Reader.Protocol {
 	case "mysql":
-		cli, err := j.ckCliMgr.GetMySQLClient(j.config.Reader.Name)
-		if err != nil {
-			return 0, fmt.Errorf("failed to get MySQL client: %w", err)
+		switch j.config.Reader.Vendor {
+		case "clickhouse":
+			cli, err := j.ckCliMgr.GetMySQLClient(j.config.Reader.Name)
+			if err != nil {
+				return 0, fmt.Errorf("failed to get MySQL client: %w", err)
+			}
+			return cli.Count(context.Background(), query)
+		case "starrocks":
+			cli, err := j.srCliMgr.GetMySQLClient(j.config.Reader.Name)
+			if err != nil {
+				return 0, fmt.Errorf("failed to get MySQL client: %w", err)
+			}
+			return cli.Count(context.Background(), query)
+		default:
+			return 0, fmt.Errorf("unsupported vendor: %s", j.config.Reader.Vendor)
 		}
-		return cli.Count(context.Background(), query)
-	case "http":
-		// HTTP协议暂不支持Count查询，返回0
-		j.logger.Warn("HTTP protocol does not support COUNT query, returning 0")
-		return 0, nil
 	default:
 		return 0, fmt.Errorf("unsupported protocol: %s", j.config.Reader.Protocol)
 	}

@@ -107,9 +107,9 @@ func validateMySQLConfig(config *MySQLConfig) error {
 	if config.Port <= 0 || config.Port > 65535 {
 		return fmt.Errorf("mysql port must be between 1 and 65535")
 	}
-	if config.Username == "" {
-		return fmt.Errorf("mysql username cannot be empty")
-	}
+	// if config.Username == "" {
+	// 	return fmt.Errorf("mysql username cannot be empty")
+	// }
 	if config.Timeout <= 0 {
 		return fmt.Errorf("mysql timeout must be positive")
 	}

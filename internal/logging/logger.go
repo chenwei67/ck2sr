@@ -37,7 +37,7 @@ func CreateLogger(logConfig config.LogConfig) (*logrus.Logger, error) {
 	logger.SetOutput(output)
 
 	// 设置调用者报告
-	logger.SetReportCaller(true)
+	// logger.SetReportCaller(true)
 
 	return logger, nil
 }
