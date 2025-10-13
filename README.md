@@ -175,10 +175,6 @@ sync_tasks:
 
 # 全局策略配置
 policy:
-  transfer:
-    progress_report_interval_sec: 10
-    rate_limit_sleep: "10ms"
-    writer_concurrency: 3
   schedule:
     check_interval: "1m"
     retry_interval: "5m"
@@ -245,14 +241,6 @@ starrocks:
       username: "root"
       password: ""
       timeout: "30s"
-    flightsql:                   # FlightSQL 协议配置（高性能读取，可选）
-      host: "localhost"
-      port: 9408
-      username: "root"
-      password: ""
-      timeout: "30s"
-      tls:
-        enabled: false
     http:                        # HTTP 协议配置（用于 Stream Load 写入）
       host: "localhost"
       port: 8030
@@ -298,16 +286,16 @@ sync_tasks:
         start_time: "2024-01-01 00:00:00"  # 起始时间
         end_time: ""                        # 结束时间（空表示同步到最新）
 
-      # 时间窗口
-      time_window:
-        start_time: "01:00"      # 允许同步的起始时间
-        end_time: "05:00"        # 允许同步的结束时间
-
-      # 速率限制
-      rate_limit:
-        max_bytes_per_second: 52428800    # 最大字节/秒（50MB/s）
-        max_rows_per_second: 50000        # 最大行数/秒
-        burst_size: 1000                  # 突发大小
+      # 数据过滤策略
+      filter:
+        # 排除列列表（在所有任务中排除这些列）
+        exclude_columns:
+        - "internal_field"
+        - "temp_column"
+        # 固定值列映射（将指定列替换为固定值）
+        fixed_values:
+          sync_timestamp: 1740924169
+          sync_flag: "manual"
 
       # 重试配置
       retry:
@@ -331,15 +319,14 @@ sync_tasks:
 
 ```yaml
 policy:
-  # 数据传输策略
-  transfer:
-    progress_report_interval_sec: 10    # 进度日志输出间隔（秒）
-    rate_limit_sleep: "10ms"            # 批次间限速休眠时间
-    writer_concurrency: 3               # Writer并发数量（建议值：1-5）
-
   # 调度策略
   schedule:
-    check_interval: "1m"                # 定时任务扫描间隔（暂未使用）
+    # 时间窗口策略（全局配置，所有任务遵循统一时间窗口）
+    time_window:
+      enabled: false                 # 是否启用时间窗口策略
+      start_time: ""                 # 窗口起始时间（格式：HH:MM，如"01:00"）
+      end_time: ""                   # 窗口结束时间（格式：HH:MM，如"05:00"）
+    check_interval: "1m"                # 时间窗口检查间隔（用于轮询）
     retry_interval: "5m"                # 失败任务重试等待时间
     retry_times: 3                      # 失败重试次数：0=不重试，-1=无限重试，N=最多重试N次
     max_concurrent_task: 2              # 最大并发任务数（串行执行时设置为1）
@@ -352,11 +339,6 @@ policy:
     max_idle_conns: 100                 # 最大空闲连接数
     max_conns_per_host: 10              # 每个主机最大连接数
 
-  # 数据过滤策略
-  filter:
-    exclude_columns: []                 # 需要排除的列
-    fixed_values: {}                    # 固定值列（临时方案）
-
   # 重试策略（统一Reader、Writer、Scheduler的重试策略）
   retry:
     max_attempts: 3                     # 最大重试次数（包含首次尝试）
@@ -368,12 +350,14 @@ policy:
 
 **关键配置说明**：
 
-#### transfer 配置
-- `progress_report_interval_sec`：每隔N秒输出一次进度日志，用于监控同步进度
-- `rate_limit_sleep`：批次写入之间的休眠时间，用于控制写入速率
-- `writer_concurrency`：并发Writer数量，过高可能导致目标数据库压力过大
-
 #### schedule 配置
+- `time_window`：时间窗口策略（全局配置）
+  - `enabled`：是否启用时间窗口策略（默认 false）
+  - `start_time`：窗口起始时间（HH:MM格式，如 "01:00"）
+  - `end_time`：窗口结束时间（HH:MM格式，如 "05:00"）
+  - 支持跨日窗口：如 `start_time="23:00", end_time="03:00"` 表示晚上11点到凌晨3点
+  - 空值表示全天候执行，无时间限制
+- `check_interval`：时间窗口检查间隔，窗口外时按此间隔轮询等待
 - `retry_times`：任务级别重试次数
   - `0`：不重试，任务失败后直接退出
   - `-1`：无限重试，直到成功或手动停止
@@ -394,10 +378,6 @@ policy:
   - `true`：在退避时间上增加 ±25% 随机浮动
   - `false`：使用固定的退避时间
   - 用途：避免多个失败任务同时重试导致的惊群效应
-
-#### filter 配置
-- `exclude_columns`：全局排除列列表，这些列不会被同步到目标表
-- `fixed_values`：全局固定值列映射，指定列将被替换为配置的固定值
 
 ### 日志配置
 
@@ -448,7 +428,7 @@ ck2sr 使用文件系统持久化任务状态和进度信息，支持断点续�
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `task_id` | string | 任务唯一标识 |
-| `status` | string | 任务状态：`idle`（未执行）、`running`（执行中）、`success`（成功）、`failed`（失败） |
+| `status` | string | 任务状态：`idle`（未执行）、`running`（执行中）、`success`（成功）、`failed`（失败）、`paused`（时间窗口外暂停） |
 | `schedule_times` | int64 | 调度次数（包含首次执行和所有重试） |
 | `failed_times` | int64 | 失败次数 |
 | `started_at` | timestamp | 首次启动时间 |
@@ -622,54 +602,13 @@ sync_tasks:
         time_column: "created_at"
         start_time: "2024-01-01 00:00:00"
 
-      # 列映射
-      column_mapping:
-        user_id: "id"
-        user_name: "name"
-        create_time: "created_at"
-
-      batch_size: 10000
-
-# 全局过滤配置
-policy:
-  filter:
-    exclude_columns:
-      - "internal_field"
-      - "temp_data"
-    fixed_values:
-      sync_timestamp: 1704067200
-```
-
-### 时间范围同步
-
-```yaml
-sync_tasks:
-  - task_id: "time_range_sync"
-    name: "时间范围同步示例"
-    enabled: true
-    reader:
-      name: "myck-1"
-      vendor: "clickhouse"
-      protocol: "mysql"
-      database: "test"
-      tables: ["events"]
-    writer:
-      name: "mysr-1"
-      vendor: "starrocks"
-      protocol: "http"
-      database: "test"
-      tables: ["events_sync"]
-    settings:
-      data_range:
-        time_column: "event_time"
-        start_time: "2024-01-01 00:00:00"
-        end_time: "2024-12-31 23:59:59"
-
-      # 时间窗口限制（仅在凌晨1点到5点执行）
-      time_window:
-        start_time: "01:00"
-        end_time: "05:00"
-
+      # 数据过滤
+      filter:
+        exclude_columns:
+          - "internal_field"
+          - "temp_data"
+        fixed_values:
+          sync_timestamp: 1704067200
       batch_size: 10000
 ```
 
@@ -790,39 +729,6 @@ go test -bench=. -benchmem ./...
 ```
 
 ## 🔍 运维指南
-
-### 性能调优
-
-#### 批处理大小优化
-
-```yaml
-policy:
-  transfer:
-    batch_size: 10000      # 小数据集：5000-10000
-                           # 中等数据集：10000-20000
-                           # 大数据集：20000-50000
-```
-
-#### Writer 并发优化
-
-```yaml
-policy:
-  transfer:
-    writer_concurrency: 3  # 根据目标数据库性能调整
-                           # 建议值：2-5
-                           # 过高可能导致目标数据库压力过大
-```
-
-#### 连接池优化
-
-```yaml
-policy:
-  http:
-    max_idle_conns: 100          # 最大空闲连接数
-    max_conns_per_host: 10       # 每个主机最大连接数
-    idle_conn_timeout: "60s"     # 空闲连接超时
-```
-
 ### 监控指标
 
 当前版本通过日志输出监控信息，包括：

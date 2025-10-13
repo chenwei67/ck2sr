@@ -292,11 +292,6 @@ func (t *SyncTask) Execute(ctx context.Context) error {
 		}
 	}
 
-	// TODO: 这里为何要保存进度状态？不是已经在每个TableSyncJob里保存了吗？
-	// if err := t.saveProgress(ctx); err != nil {
-	// 	t.logger.Errorf("Failed to save progress: %v", err)
-	// }
-
 	// 记录总体统计
 	t.logSummaryStats(successCount, totalTables)
 

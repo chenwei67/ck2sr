@@ -9,7 +9,6 @@ type PolicyConfig struct {
 	Transfer TransferPolicyConfig `yaml:"transfer"`
 	Schedule SchedulePolicyConfig `yaml:"schedule"`
 	HTTP     HTTPPolicyConfig     `yaml:"http"`
-	Filter   FilterPolicyConfig   `yaml:"filter"`
 	Retry    RetryPolicyConfig    `yaml:"retry"`
 }
 
@@ -22,10 +21,18 @@ type TransferPolicyConfig struct {
 
 // SchedulePolicyConfig 调度策略配置
 type SchedulePolicyConfig struct {
-	CheckInterval     time.Duration `yaml:"check_interval"`      // 定时任务扫描间隔
-	RetryInterval     time.Duration `yaml:"retry_interval"`      // 失败重试等待时间
-	RetryTimes        int           `yaml:"retry_times"`         // 最大重试次数：0=不重试，-1=无限重试，N=最多重试N次
-	MaxConcurrentTask int           `yaml:"max_concurrent_task"` // 最大并发任务数
+	TimeWindow        TimeWindowPolicyConfig `yaml:"time_window"`         // 时间窗口策略
+	CheckInterval     time.Duration          `yaml:"check_interval"`      // 定时任务扫描间隔
+	RetryInterval     time.Duration          `yaml:"retry_interval"`      // 失败重试等待时间
+	RetryTimes        int                    `yaml:"retry_times"`         // 最大重试次数：0=不重试，-1=无限重试，N=最多重试N次
+	MaxConcurrentTask int                    `yaml:"max_concurrent_task"` // 最大并发任务数
+}
+
+// TimeWindowPolicyConfig 时间窗口策略配置
+type TimeWindowPolicyConfig struct {
+	Enabled   bool   `yaml:"enabled"`    // 是否启用时间窗口策略
+	StartTime string `yaml:"start_time"` // 窗口起始时间（HH:MM，24小时制）
+	EndTime   string `yaml:"end_time"`   // 窗口结束时间（HH:MM，24小时制）
 }
 
 // HTTPPolicyConfig HTTP策略配置
@@ -61,6 +68,11 @@ func DefaultPolicyConfig() *PolicyConfig {
 			WriterConcurrency:         1,                    // 默认1个并发Writer
 		},
 		Schedule: SchedulePolicyConfig{
+			TimeWindow: TimeWindowPolicyConfig{
+				Enabled:   false, // 默认不启用时间窗口
+				StartTime: "",
+				EndTime:   "",
+			},
 			CheckInterval:     10 * time.Second, // 每10秒检查一次
 			RetryInterval:     10 * time.Second, // 失败后10秒重试
 			RetryTimes:        3,                // 最多重试3次
@@ -72,10 +84,6 @@ func DefaultPolicyConfig() *PolicyConfig {
 			TLSHandshakeTimeout: 10 * time.Second,
 			MaxIdleConns:        100,
 			MaxConnsPerHost:     100,
-		},
-		Filter: FilterPolicyConfig{
-			ExcludeColumns: []string{},
-			FixedValues:    map[string]interface{}{},
 		},
 		Retry: RetryPolicyConfig{
 			MaxAttempts:       3,                // 最多重试3次

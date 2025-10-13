@@ -179,7 +179,7 @@ func (j *DefaultTableSyncJob) Start(ctx context.Context) error {
 		totalRows, err := j.queryTotalRows()
 		if err != nil {
 			j.logger.Warnf("Failed to query total rows for table %s: %v, will continue without total count", j.tableName, err)
-			j.progress.TotalRows = 0
+			return err
 		} else {
 			j.progress.TotalRows = totalRows
 			j.logger.Infof("Total rows to sync for table %s: %d", j.tableName, totalRows)
@@ -188,7 +188,7 @@ func (j *DefaultTableSyncJob) Start(ctx context.Context) error {
 
 	// 创建数据管道
 	j.pipeline = NewPipeline(j.config, j.policy, j.ckCliMgr, j.srCliMgr, j.tableName, j.dstTable, j.logger)
-	if err := j.pipeline.Initialize(j.ctx, j.progress.Offset); err != nil {
+	if err := j.pipeline.Initialize(j.ctx, j.progress.Offset, j.progress.TotalRows); err != nil {
 		return fmt.Errorf("failed to initialize pipeline for table %s: %w", j.tableName, err)
 	}
 

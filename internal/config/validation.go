@@ -16,6 +16,10 @@ func validate(config *Config) error {
 		return fmt.Errorf("sync tasks validation failed: %w", err)
 	}
 
+	if err := validatePolicy(config); err != nil {
+		return fmt.Errorf("policy validation failed: %w", err)
+	}
+
 	if err := validateMonitor(config); err != nil {
 		return fmt.Errorf("monitor validation failed: %w", err)
 	}
@@ -209,6 +213,30 @@ func validateSyncTasks(config *Config) error {
 	return nil
 }
 
+// validatePolicy 验证全局策略配置
+func validatePolicy(config *Config) error {
+	if config.Policy.Transfer.WriterConcurrency <= 0 {
+		// 并发Writer数量必须为正
+		config.Policy.Transfer.WriterConcurrency = 1 // 设置默认值
+		return nil
+	}
+	if config.Policy.Schedule.RetryTimes < 0 && config.Policy.Schedule.RetryTimes != -1 {
+		return fmt.Errorf("schedule retry_times must be positive or -1 for infinite retries")
+	}
+	if config.Policy.Schedule.RetryInterval < 0 {
+		return fmt.Errorf("schedule retry_interval must be positive")
+	}
+	if config.Policy.Schedule.CheckInterval <= 0 {
+		config.Policy.Schedule.CheckInterval = 10 * time.Second // 设置默认值
+		return nil
+	}
+	if config.Policy.Schedule.MaxConcurrentTask <= 0 {
+		config.Policy.Schedule.MaxConcurrentTask = 1 // 设置默认值
+		return nil
+	}
+	return nil
+}
+
 // validateDataSource 验证数据源配置
 func validateDataSource(source *DataSourceConfig, sourceType string, allDBNames map[string]bool) error {
 	if source.Name == "" {
@@ -280,20 +308,6 @@ func validateSyncSettings(settings *SyncSettingsConfig, taskID string) error {
 
 	if settings.ParallelTables <= 0 {
 		return fmt.Errorf("task %s: parallel_tables must be positive", taskID)
-	}
-
-	// 验证重试配置
-	if settings.Retry.MaxRetries < 0 {
-		return fmt.Errorf("task %s: max_retries cannot be negative", taskID)
-	}
-	if settings.Retry.InitialDelay <= 0 {
-		return fmt.Errorf("task %s: initial_delay must be positive", taskID)
-	}
-	if settings.Retry.MaxDelay <= 0 {
-		return fmt.Errorf("task %s: max_delay must be positive", taskID)
-	}
-	if settings.Retry.BackoffFactor <= 1.0 {
-		return fmt.Errorf("task %s: backoff_factor must be greater than 1.0", taskID)
 	}
 
 	// 验证时间格式

@@ -10,6 +10,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/sunkaimr/ck2sr/internal/config"
 	"github.com/sunkaimr/ck2sr/internal/storage"
+	"github.com/sunkaimr/ck2sr/pkg/utils"
 )
 
 type TaskStatus string
@@ -86,6 +87,27 @@ func (s *Scheduler) UnregisterTask(taskID string) error {
 func (s *Scheduler) Start(ctx context.Context) error {
 	s.logger.Info("Scheduler starting with two-phase scheduling algorithm...")
 
+	// 检查时间窗口配置
+	timeWindowCfg := s.config.Schedule.TimeWindow
+	if timeWindowCfg.Enabled {
+		s.logger.Infof("Time window policy enabled: %s",
+			utils.FormatTimeWindow(timeWindowCfg.StartTime, timeWindowCfg.EndTime))
+
+		// 检查当前是否在时间窗口内
+		inWindow, err := utils.IsInTimeWindow(timeWindowCfg.StartTime, timeWindowCfg.EndTime)
+		if err != nil {
+			return fmt.Errorf("failed to check time window: %w", err)
+		}
+
+		if !inWindow {
+			// 不在时间窗口内，等待
+			s.logger.Info("Current time is outside the time window, waiting...")
+			if err := s.waitForTimeWindow(ctx); err != nil {
+				return fmt.Errorf("failed to wait for time window: %w", err)
+			}
+		}
+	}
+
 	// Phase 1: 执行所有未执行的任务（idle状态或无状态）
 	s.logger.Info("Phase 1: Executing all pending tasks...")
 	if err := s.executePhase1(ctx); err != nil {
@@ -141,7 +163,7 @@ func (s *Scheduler) executePhase1(ctx context.Context) error {
 	}
 	s.mu.RUnlock()
 
-	// 筛选需要在Phase 1执行的任务（状态为idle或无状态）
+	// 筛选需要在Phase 1执行的任务（状态为idle、paused或无状态）
 	pendingTasks := make(map[string]TaskExecutor)
 	for taskID, task := range tasks {
 		if !task.GetTaskConfig().Enabled {
@@ -150,8 +172,17 @@ func (s *Scheduler) executePhase1(ctx context.Context) error {
 		}
 
 		state, err := s.storage.LoadTaskState(ctx, taskID)
-		if err != nil || state == nil || state.Status == storage.TaskStatusIdle || state.Status == storage.TaskStatusRunning {
-			// 无状态、idle状态或者执行中的任务需要在Phase 1执行
+		if err != nil || state == nil || state.Status == storage.TaskStatusIdle || state.Status == storage.TaskStatusRunning || state.Status == storage.TaskStatusPaused {
+			// 无状态、idle状态、running状态或paused状态的任务需要在Phase 1执行
+			// paused状态表示之前因时间窗口暂停，需要恢复执行
+			if state != nil && state.Status == storage.TaskStatusPaused {
+				s.logger.Infof("Phase 1: Task %s was paused, will resume execution", taskID)
+				// 将paused状态恢复为idle，准备重新执行
+				state.Status = storage.TaskStatusIdle
+				if err := s.storage.SaveTaskState(ctx, state); err != nil {
+					s.logger.Errorf("Failed to update paused task state: %v", err)
+				}
+			}
 			pendingTasks[taskID] = task
 			s.logger.Infof("Phase 1: Task %s will be executed (status: %v)", taskID, state)
 		} else if state.Status == storage.TaskStatusSuccess {
@@ -403,4 +434,91 @@ func (s *Scheduler) ListTasks() []string {
 		taskIDs = append(taskIDs, taskID)
 	}
 	return taskIDs
+}
+
+// waitForTimeWindow 等待进入时间窗口
+// 使用轮询机制，每隔 check_interval 检查一次是否进入时间窗口
+func (s *Scheduler) waitForTimeWindow(ctx context.Context) error {
+	timeWindowCfg := s.config.Schedule.TimeWindow
+	checkInterval := s.config.Schedule.CheckInterval
+
+	// 计算初始等待时间
+	waitDuration, err := utils.CalculateWaitDuration(timeWindowCfg.StartTime, timeWindowCfg.EndTime)
+	if err != nil {
+		return fmt.Errorf("failed to calculate wait duration: %w", err)
+	}
+
+	s.logger.Infof("Waiting for time window to open (estimated: %v)", waitDuration)
+
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			s.logger.Info("Time window wait cancelled by context")
+			return ctx.Err()
+		case <-ticker.C:
+			// 检查是否进入时间窗口
+			inWindow, err := utils.IsInTimeWindow(timeWindowCfg.StartTime, timeWindowCfg.EndTime)
+			if err != nil {
+				s.logger.Errorf("Failed to check time window: %v", err)
+				continue
+			}
+
+			if inWindow {
+				s.logger.Info("Entered time window, resuming scheduler")
+				return nil
+			}
+
+			s.logger.Debugf("Still outside time window, checking again in %v", checkInterval)
+		}
+	}
+}
+
+// checkTimeWindowDuringExecution 在任务执行期间检查时间窗口
+// 如果超出时间窗口，暂停所有运行中的任务
+func (s *Scheduler) checkTimeWindowDuringExecution(ctx context.Context) bool {
+	timeWindowCfg := s.config.Schedule.TimeWindow
+	if !timeWindowCfg.Enabled {
+		return true // 未启用时间窗口，始终允许执行
+	}
+
+	inWindow, err := utils.IsInTimeWindow(timeWindowCfg.StartTime, timeWindowCfg.EndTime)
+	if err != nil {
+		s.logger.Errorf("Failed to check time window: %v", err)
+		return true // 发生错误时继续执行
+	}
+
+	if !inWindow {
+		s.logger.Warn("Time window closed during execution, pausing tasks")
+		// 发送暂停信号到所有运行中的任务
+		s.pauseAllRunningTasks()
+		return false
+	}
+
+	return true
+}
+
+// pauseAllRunningTasks 暂停所有运行中的任务
+func (s *Scheduler) pauseAllRunningTasks() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for taskID, cancel := range s.running {
+		s.logger.Infof("Pausing running task due to time window: %s", taskID)
+		cancel()
+
+		// 更新任务状态为 paused
+		if state, err := s.storage.LoadTaskState(context.Background(), taskID); err == nil && state != nil {
+			state.Status = storage.TaskStatusPaused
+			state.UpdatedAt = time.Now()
+			if err := s.storage.SaveTaskState(context.Background(), state); err != nil {
+				s.logger.Errorf("Failed to save paused state for task %s: %v", taskID, err)
+			}
+		}
+	}
+
+	// 清空 running 映射
+	s.running = make(map[string]context.CancelFunc)
 }

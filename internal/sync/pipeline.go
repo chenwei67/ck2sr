@@ -99,7 +99,7 @@ func (p *Pipeline) SetProgressCallback(callback func(progress ProgressInfo)) {
 }
 
 // Initialize 初始化Pipeline组件
-func (p *Pipeline) Initialize(ctx context.Context, offset int64) error {
+func (p *Pipeline) Initialize(ctx context.Context, offset int64, limit int64) error {
 	readerFactory := reader.NewReaderFactory()
 	writerFactory := writer.NewWriterFactory()
 
@@ -139,14 +139,13 @@ func (p *Pipeline) Initialize(ctx context.Context, offset int64) error {
 				query += fmt.Sprintf(" WHERE %s < '%s'", p.config.Settings.DataRange.TimeColumn, p.config.Settings.DataRange.EndTime)
 			}
 		}
-		// 存在任何一个时间范围条件时，追加ORDER BY
-		query += fmt.Sprintf(" ORDER BY %s", p.config.Settings.DataRange.TimeColumn)
 	}
-	if offset > 0 {
-		query += fmt.Sprintf(" OFFSET %d", offset)
+	if offset > 0 && limit > 0 {
+		// 兼容性：starRocks强制要求和LIMIT一起使用OFFSET的情况
+		query += fmt.Sprintf(" LIMIT %d OFFSET %d", limit, offset)
 	}
 
-	if err := p.reader.SetColumnFilter(p.policy.Filter.ExcludeColumns, p.policy.Filter.FixedValues).
+	if err := p.reader.SetColumnFilter(p.config.Settings.Filter.ExcludeColumns, p.config.Settings.Filter.FixedValues).
 		SetQuery(query).Execute(ctx); err != nil {
 		return fmt.Errorf("failed to execute reader query: %w", err)
 	}
@@ -256,6 +255,23 @@ func (p *Pipeline) readData(ctx context.Context, table string) error {
 		currentBatchBytes := int64(0)
 
 		for {
+			// 检查上下文取消，避免CTRL+C时阻塞
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			// 时间窗口检查
+			if p.policy.Schedule.TimeWindow.Enabled {
+				if ok, _ := utils.IsInTimeWindow(p.policy.Schedule.TimeWindow.StartTime, p.policy.Schedule.TimeWindow.EndTime); !ok {
+					p.logger.Infof("Current time is outside the allowed time window (%s - %s). Pausing reading.",
+						p.policy.Schedule.TimeWindow.StartTime, p.policy.Schedule.TimeWindow.EndTime)
+					time.Sleep(p.policy.Schedule.CheckInterval)
+					continue
+				}
+			}
+
 			// 获取当前记录
 			record, err := p.reader.GetRecord()
 			if err != nil {
@@ -301,11 +317,6 @@ func (p *Pipeline) readData(ctx context.Context, table string) error {
 
 				batchCount++
 				p.updateBatchCount(1)
-
-				// 限速控制
-				if p.policy.Transfer.RateLimitSleep > 0 {
-					time.Sleep(p.policy.Transfer.RateLimitSleep)
-				}
 
 				// 重置批次
 				batch = make([]interface{}, 0, batchSize)

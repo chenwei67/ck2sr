@@ -12,6 +12,7 @@ const (
 	TaskStatusRunning TaskStatus = "running"
 	TaskStatusSuccess TaskStatus = "success"
 	TaskStatusFailed  TaskStatus = "failed"
+	TaskStatusPaused  TaskStatus = "paused" // 时间窗口外暂停状态
 )
 
 // TaskState 任务状态

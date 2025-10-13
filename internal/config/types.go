@@ -90,11 +90,8 @@ type DataSourceConfig struct {
 // 同步设置配置
 type SyncSettingsConfig struct {
 	DataRange             DataRangeConfig                `yaml:"data_range"`
-	TimeWindow            TimeWindowConfig               `yaml:"time_window"`
-	RateLimit             RateLimitConfig                `yaml:"rate_limit"`
-	Retry                 RetryConfig                    `yaml:"retry"`
-	ColumnMapping         map[string]string              `yaml:"column_mapping"`
 	TableSpecificSettings map[string]TableSpecificConfig `yaml:"table_specific_settings"`
+	Filter                FilterPolicyConfig             `yaml:"filter"`         // 新增：过滤配置
 	BatchSize             int                            `yaml:"batch_size"`     // 按条数攒批
 	BatchBytes            int64                          `yaml:"batch_bytes"`    // 按数据大小攒批（字节数）
 	BatchInterval         time.Duration                  `yaml:"batch_interval"` // 新增：批次间隔时间
