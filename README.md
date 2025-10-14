@@ -297,13 +297,6 @@ sync_tasks:
           sync_timestamp: 1740924169
           sync_flag: "manual"
 
-      # 重试配置
-      retry:
-        max_retries: 3
-        initial_delay: "2s"
-        max_delay: "60s"
-        backoff_factor: 2.0
-
       # 列映射
       column_mapping:
         user_id: "id"              # 源列名: 目标列名

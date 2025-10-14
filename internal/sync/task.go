@@ -192,7 +192,7 @@ func (t *SyncTask) logSummaryStats(successCount, totalTables int) {
 
 	t.jobsMu.RLock()
 	for _, job := range t.jobs {
-		stats := job.GetStats()
+		stats := job.GetProgress()
 		totalRows += stats.ProcessedRows
 		totalBytes += stats.ProcessedBytes
 		if stats.StartTime.Before(earliestStart) || earliestStart.IsZero() {
@@ -226,11 +226,7 @@ func (t *SyncTask) Execute(ctx context.Context) error {
 		t.logger.Infof("Task %s is disabled, skipping", t.config.TaskID)
 		return nil
 	}
-
 	t.status = TaskStatusRunning
-	defer func() {
-		t.status = TaskStatusCompleted
-	}()
 
 	t.logger.Infof("Starting sync task: %s", t.config.TaskID)
 	t.logTaskConfiguration()
@@ -283,7 +279,7 @@ func (t *SyncTask) Execute(ctx context.Context) error {
 		close(errChan)
 	}()
 
-	// 收集结果
+	// 阻塞式收集结果
 	for err := range errChan {
 		if err != nil {
 			lastError = err
@@ -295,16 +291,14 @@ func (t *SyncTask) Execute(ctx context.Context) error {
 	// 记录总体统计
 	t.logSummaryStats(successCount, totalTables)
 
-	// 判断任务是否成功
-	if successCount == 0 && totalTables > 0 {
+	// 判断任务是否失败
+	if successCount != totalTables {
 		t.status = TaskStatusFailed
-		return fmt.Errorf("all tables failed, last error: %v", lastError)
+		return fmt.Errorf("some tables sync failed, success: %d/%d, last error: %v", successCount, totalTables, lastError)
 	}
 
-	if successCount < totalTables {
-		t.logger.Warnf("Partial success: %d/%d tables completed", successCount, totalTables)
-	}
-
+	// 全部成功
+	t.status = TaskStatusCompleted
 	return nil
 }
 

@@ -359,6 +359,7 @@ func (s *Scheduler) executeTaskSync(ctx context.Context, task TaskExecutor) erro
 		return err
 	}
 
+	// 此次阻塞式执行
 	err := task.Execute(ctx)
 
 	state.UpdatedAt = time.Now()

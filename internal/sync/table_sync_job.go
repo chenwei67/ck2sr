@@ -26,34 +26,35 @@ type TableSyncJob interface {
 
 	// GetProgress 获取同步进度
 	GetProgress() *TableSyncProgress
-
-	// GetStats 获取统计信息
-	GetStats() *TableSyncStats
 }
 
-// TableSyncProgress 表同步进度
+// TableSyncProgress 表同步进度信息
 type TableSyncProgress struct {
-	TaskID           string    `json:"task_id"`           // 所属任务ID
-	TableName        string    `json:"table_name"`        // 表名
-	Offset           int64     `json:"offset"`            // 当前偏移量
-	TotalRows        int64     `json:"total_rows"`        // 总行数（估算）
-	ProcessedBatches int64     `json:"processed_batches"` // 已处理批次数
-	ProcessedRows    int64     `json:"processed_rows"`    // 已处理行数
-	ProcessedBytes   int64     `json:"processed_bytes"`   // 已处理字节数
-	LastSyncTime     time.Time `json:"last_sync_time"`    // 最后同步时间
-	Status           string    `json:"status"`            // 同步状态: pending, running, completed, failed
+	TaskID           string        `json:"task_id"`           // 所属任务ID
+	TableName        string        `json:"table_name"`        // 表名
+	Offset           int64         `json:"offset"`            // 当前偏移量
+	TotalRows        int64         `json:"total_rows"`        // 要同步的总行数
+	ProcessedBatches int64         `json:"processed_batches"` // 已处理批次数
+	ProcessedRows    int64         `json:"processed_rows"`    // 已处理行数
+	ProcessedBytes   int64         `json:"processed_bytes"`   // 已处理字节数
+	Progress         float64       `json:"progress"`          // 百分比（0.00-100.00）
+	LastSyncTime     time.Time     `json:"last_sync_time"`    // 最后更新时间
+	StartTime        time.Time     `json:"start_time"`        // 同步开始时间
+	EndTime          time.Time     `json:"end_time"`          // 同步结束时间
+	Duration         time.Duration `json:"duration"`          // 同步耗时
+	Status           string        `json:"status"`            // 同步状态: pending, running, completed, failed
 }
 
 // TableSyncStats 表同步统计
 type TableSyncStats struct {
-	TableName      string        `json:"table_name"`
-	StartTime      time.Time     `json:"start_time"`
-	EndTime        time.Time     `json:"end_time"`
-	Duration       time.Duration `json:"duration"`
-	ProcessedRows  int64         `json:"processed_rows"`
-	ProcessedBytes int64         `json:"processed_bytes"`
-	ErrorCount     int64         `json:"error_count"`
-	Status         string        `json:"status"`
+	TableName      string        `json:"table_name"`      // Deprecated 表名
+	StartTime      time.Time     `json:"start_time"`      // Deprecated同步开始时间
+	EndTime        time.Time     `json:"end_time"`        // Deprecated 同步结束时间
+	Duration       time.Duration `json:"duration"`        // Deprecated 同步耗时
+	ProcessedRows  int64         `json:"processed_rows"`  // Deprecated
+	ProcessedBytes int64         `json:"processed_bytes"` // Deprecated
+	ErrorCount     int64         `json:"error_count"`     // Deprecated 同步失败次数
+	Status         string        `json:"status"`          // Deprecated 同步结果: pending, running, completed, failed
 }
 
 // DefaultTableSyncJob 默认的表同步作业实现
@@ -69,7 +70,6 @@ type DefaultTableSyncJob struct {
 	logger    *logrus.Logger           // 日志记录器
 	pipeline  *Pipeline                // 数据管道
 	progress  *TableSyncProgress       // 同步进度
-	stats     *TableSyncStats          // 统计信息
 	// mu        sync.RWMutex             // 读写锁，是想保护哪个数据？
 	ctx    context.Context    // 上下文
 	cancel context.CancelFunc // 取消函数
@@ -100,22 +100,9 @@ func NewTableSyncJob(taskID, tableName string, dstTable string,
 		storage:   store,
 		logger:    tableLogger,
 		progress: &TableSyncProgress{
-			TaskID:        taskID,
-			TableName:     tableName,
-			Offset:        0,
-			TotalRows:     0,
-			ProcessedRows: 0,
-			LastSyncTime:  time.Time{},
-			Status:        "pending",
-		},
-		stats: &TableSyncStats{
-			TableName:      tableName,
-			StartTime:      time.Time{},
-			EndTime:        time.Time{},
-			ProcessedRows:  0,
-			ProcessedBytes: 0,
-			ErrorCount:     0,
-			Status:         "pending",
+			TaskID:    taskID,
+			TableName: tableName,
+			Status:    "pending",
 		},
 	}
 
@@ -136,18 +123,15 @@ func (j *DefaultTableSyncJob) Start(ctx context.Context) error {
 
 	// 更新状态为运行中
 	j.progress.Status = "running"
-	j.stats.Status = "running"
 	// 仅在新任务时设置StartTime，断点续传时保留原有时间
-	if j.stats.StartTime.IsZero() {
-		j.stats.StartTime = time.Now()
+	if j.progress.StartTime.IsZero() {
+		j.progress.StartTime = time.Now()
 	}
 
 	// 从存储中加载上次的同步进度
 	progressLoaded := false
 	if err := j.loadProgress(); err != nil {
 		j.logger.Infof("No previous progress found for table %s, starting from beginning (reason: %v)", j.tableName, err)
-		j.progress.Offset = 0
-		j.progress.ProcessedRows = 0
 	} else {
 		// 成功加载了进度数据
 		progressLoaded = true
@@ -155,22 +139,11 @@ func (j *DefaultTableSyncJob) Start(ctx context.Context) error {
 			j.tableName, j.progress.Offset, j.progress.ProcessedRows, j.progress.TotalRows)
 
 		// 幂等性检查：如果表已经完成同步，直接返回成功
-		if j.progress.Status == "completed" || (j.progress.TotalRows > 0 && j.progress.ProcessedRows >= j.progress.TotalRows) {
-			j.logger.Infof("Table %s already completed (processed_rows=%d, total_rows=%d, status=%s), skipping resync",
-				j.tableName, j.progress.ProcessedRows, j.progress.TotalRows, j.progress.Status)
-			// 确保状态设置为 completed（同步操作，不使用 goroutine）
-			j.progress.Status = "completed"
-			j.stats.Status = "completed"
-			if j.stats.EndTime.IsZero() {
-				j.stats.EndTime = time.Now()
-				j.stats.Duration = j.stats.EndTime.Sub(j.stats.StartTime)
-			}
-			// 保存最终状态（同步操作）
-			if err := j.saveProgress(); err != nil {
-				j.logger.Warnf("Failed to save completed status for table %s: %v", j.tableName, err)
-			}
+		if j.progress.Status == "completed" {
 			j.logger.Infof("Table %s status already completed, no sync needed", j.tableName)
 			return nil
+		} else {
+			j.progress.Status = "running"
 		}
 	}
 
@@ -204,7 +177,7 @@ func (j *DefaultTableSyncJob) Start(ctx context.Context) error {
 		}
 	}
 
-	// 启动同步过程（同步操作，不使用 goroutine）
+	// 启动同步过程
 	if err := j.syncTable(); err != nil {
 		j.logger.Errorf("Failed sync job for table %s: %v", j.tableName, err)
 		j.handleError(err)
@@ -233,16 +206,6 @@ func (j *DefaultTableSyncJob) GetProgress() *TableSyncProgress {
 	// 创建副本以避免并发访问问题
 	progress := *j.progress
 	return &progress
-}
-
-// GetStats 获取统计信息
-func (j *DefaultTableSyncJob) GetStats() *TableSyncStats {
-	// 创建副本并计算当前持续时间
-	stats := *j.stats
-	if !stats.StartTime.IsZero() && stats.Status == "running" {
-		stats.Duration = time.Since(stats.StartTime)
-	}
-	return &stats
 }
 
 // queryTotalRows 查询本次需要同步的总行数
@@ -297,7 +260,7 @@ func (j *DefaultTableSyncJob) queryTotalRows() (int64, error) {
 func (j *DefaultTableSyncJob) saveInitialProgress() error {
 	syncProgress := &storage.SyncProgress{
 		TaskID:        j.taskID,
-		Status:        j.stats.Status,
+		Status:        j.progress.Status,
 		SourceDB:      j.config.Reader.Database, // 源数据库
 		SourceTable:   j.tableName,
 		TargetDB:      j.config.Writer.Database, // 目标数据库
@@ -325,21 +288,16 @@ func (j *DefaultTableSyncJob) loadProgress() error {
 		return fmt.Errorf("no progress data found")
 	}
 
+	// 读取中断重试关心的字段数据
 	j.progress.Offset = syncProgress.SyncedRows // 使用已同步行数作为偏移量
 	j.progress.ProcessedRows = syncProgress.SyncedRows
 	j.progress.ProcessedBytes = syncProgress.SyncedBytes
 	j.progress.TotalRows = syncProgress.TotalRows
-	j.progress.LastSyncTime = syncProgress.LastSyncTime
-	// 从存储中恢复StartSyncTime
-	j.stats.StartTime = syncProgress.StartSyncTime
+	j.progress.Status = syncProgress.Status
 
-	// 根据进度数据判断状态
+	// Progress信息是每次写入成功就会回调的，根据进度信息修改进度状态值
 	if syncProgress.Progress >= 100.0 || (syncProgress.TotalRows > 0 && syncProgress.SyncedRows >= syncProgress.TotalRows) {
 		j.progress.Status = "completed"
-	} else if syncProgress.SyncedRows > 0 {
-		j.progress.Status = "running" // 有进度但未完成，视为中断后待恢复
-	} else {
-		j.progress.Status = "pending"
 	}
 
 	return nil
@@ -347,27 +305,19 @@ func (j *DefaultTableSyncJob) loadProgress() error {
 
 // saveProgress 保存同步进度到存储
 func (j *DefaultTableSyncJob) saveProgress() error {
-	// 计算进度百分比，保留2位小数
-	progress := 0.0
-	if j.progress.TotalRows > 0 {
-		rawProgress := float64(j.progress.ProcessedRows) / float64(j.progress.TotalRows) * 100
-		// 四舍五入到小数点后2位
-		progress = float64(int(rawProgress*100+0.5)) / 100
-	}
-
 	syncProgress := &storage.SyncProgress{
 		TaskID:        j.taskID,
-		Status:        j.stats.Status,
+		Status:        j.progress.Status,
 		SourceDB:      j.config.Reader.Database, // 源数据库
 		SourceTable:   j.tableName,
 		TargetDB:      j.config.Writer.Database, // 目标数据库
 		TargetTable:   j.dstTable,
 		TotalRows:     j.progress.TotalRows,
 		SyncedRows:    j.progress.ProcessedRows,
-		SyncedBytes:   j.stats.ProcessedBytes,
-		StartSyncTime: j.stats.StartTime, // 保留原始开始时间
+		SyncedBytes:   j.progress.ProcessedBytes,
+		StartSyncTime: j.progress.StartTime, // 保留原始开始时间
 		LastSyncTime:  time.Now(),
-		Progress:      progress,
+		Progress:      j.progress.Progress,
 	}
 
 	return j.storage.SaveSyncProgress(context.Background(), syncProgress)
@@ -383,54 +333,38 @@ func (j *DefaultTableSyncJob) onBatchProgress(progress ProgressInfo) {
 
 	// 获取Pipeline最新统计信息以更新字节数
 	pipelineStats := j.pipeline.GetStats()
-	j.stats.ProcessedBytes = pipelineStats.TotalBytes
-	j.stats.ProcessedRows = pipelineStats.TotalRows
+	j.progress.ProcessedBytes = pipelineStats.TotalBytes
+	j.progress.ProcessedRows = pipelineStats.TotalRows
 
 	// 输出增强的进度日志（包含总行数、字节数、速率）
-	elapsed := time.Since(j.stats.StartTime).Seconds()
+	elapsed := time.Since(j.progress.StartTime).Seconds()
 	if elapsed > 0 {
 		rowsPerSec := float64(j.progress.ProcessedRows) / elapsed
-		bytesPerSec := float64(j.stats.ProcessedBytes) / elapsed
+		bytesPerSec := float64(j.progress.ProcessedBytes) / elapsed
 
 		if j.progress.TotalRows > 0 {
 			// 有总行数时，显示进度百分比
 			progressPct := float64(j.progress.ProcessedRows) * 100.0 / float64(j.progress.TotalRows)
 			j.logger.Infof("Progress [%s]: %d batches, %d/%d rows (%.1f%%), %.2f rows/sec, %s, %.2f MB/sec",
 				j.tableName, j.progress.ProcessedBatches, j.progress.ProcessedRows, j.progress.TotalRows,
-				progressPct, rowsPerSec, utils.FormatBytes(j.stats.ProcessedBytes), bytesPerSec/1024/1024)
+				progressPct, rowsPerSec, utils.FormatBytes(j.progress.ProcessedBytes), bytesPerSec/1024/1024)
 		} else {
 			// 无总行数时，只显示已处理数量
 			j.logger.Infof("Progress [%s]: %d batches, %d rows, %.2f rows/sec, %s, %.2f MB/sec",
 				j.tableName, j.progress.ProcessedBatches, j.progress.ProcessedRows,
-				rowsPerSec, utils.FormatBytes(j.stats.ProcessedBytes), bytesPerSec/1024/1024)
+				rowsPerSec, utils.FormatBytes(j.progress.ProcessedBytes), bytesPerSec/1024/1024)
 		}
 	}
-
-	// 创建进度数据快照，避免在异步保存时出现竞态条件
-	progressSnapshot := &storage.SyncProgress{
-		TaskID:        j.taskID,
-		SourceDB:      j.config.Reader.Database, // 源数据库
-		SourceTable:   j.tableName,
-		TargetDB:      j.config.Writer.Database, // 目标数据库
-		TargetTable:   j.dstTable,
-		TotalRows:     j.progress.TotalRows,
-		SyncedRows:    j.progress.ProcessedRows,
-		SyncedBytes:   j.stats.ProcessedBytes,
-		StartSyncTime: j.stats.StartTime,
-		LastSyncTime:  time.Now(),
-		Progress:      0.0, // 将在保存时计算
+	// 计算进度百分比
+	if j.progress.TotalRows > 0 {
+		rawProgress := float64(j.progress.ProcessedRows) / float64(j.progress.TotalRows) * 100
+		j.progress.Progress = float64(int(rawProgress*100)) / 100
 	}
 
-	// 计算进度百分比，保留2位小数
-	if progressSnapshot.TotalRows > 0 {
-		rawProgress := float64(progressSnapshot.SyncedRows) / float64(progressSnapshot.TotalRows) * 100
-		progressSnapshot.Progress = float64(int(rawProgress*100+0.5)) / 100
+	// 尝试保存当前进度状态
+	if saveErr := j.saveProgress(); saveErr != nil {
+		j.logger.Errorf("Failed to save error progress for table %s: %v", j.tableName, saveErr)
 	}
-
-	if err := j.storage.SaveSyncProgress(context.Background(), progressSnapshot); err != nil {
-		j.logger.Warnf("Failed to save batch progress for table %s: %v", j.tableName, err)
-	}
-
 }
 
 // syncTable 执行表同步逻辑
@@ -443,7 +377,7 @@ func (j *DefaultTableSyncJob) syncTable() error {
 	}
 
 	j.logger.Infof("Table synchronization completed for %s, processed %d rows",
-		j.tableName, j.stats.ProcessedRows)
+		j.tableName, j.progress.ProcessedRows)
 
 	return nil
 }
@@ -451,10 +385,8 @@ func (j *DefaultTableSyncJob) syncTable() error {
 // handleError 处理同步错误
 func (j *DefaultTableSyncJob) handleError(err error) {
 	j.progress.Status = "failed"
-	j.stats.Status = "failed"
-	j.stats.EndTime = time.Now()
-	j.stats.Duration = j.stats.EndTime.Sub(j.stats.StartTime)
-	j.stats.ErrorCount++
+	j.progress.EndTime = time.Now()
+	j.progress.Duration = j.progress.EndTime.Sub(j.progress.StartTime)
 
 	// 尝试保存当前进度状态
 	if saveErr := j.saveProgress(); saveErr != nil {
@@ -468,14 +400,13 @@ func (j *DefaultTableSyncJob) handleError(err error) {
 func (j *DefaultTableSyncJob) handleSuccess() {
 	j.progress.Status = "completed"
 	j.progress.LastSyncTime = time.Now()
-	j.stats.Status = "completed"
-	j.stats.EndTime = time.Now()
-	j.stats.Duration = j.stats.EndTime.Sub(j.stats.StartTime)
+	j.progress.EndTime = time.Now()
+	j.progress.Duration = j.progress.EndTime.Sub(j.progress.StartTime)
 
 	if err := j.saveProgress(); err != nil {
 		j.logger.Errorf("Failed to save final progress for table %s: %v", j.tableName, err)
 	}
 
 	j.logger.Infof("Table sync job completed successfully for %s in %v, processed %d rows, %d bytes",
-		j.tableName, j.stats.Duration, j.stats.ProcessedRows, j.stats.ProcessedBytes)
+		j.tableName, j.progress.Duration, j.progress.ProcessedRows, j.progress.ProcessedBytes)
 }

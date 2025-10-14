@@ -39,8 +39,8 @@ func NewHTTPClient(config *HTTPConfig, logger *logrus.Logger) (*HTTPClient, erro
 			DisableKeepAlives:   false,            // 启用连接复用
 			// TLS 和超时配置
 			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 30 * time.Second, // 响应头超时
-			ExpectContinueTimeout: 1 * time.Second,  // Expect: 100-continue 超时
+			ResponseHeaderTimeout: 300 * time.Second, // 响应头超时
+			ExpectContinueTimeout: 10 * time.Second,  // Expect: 100-continue 超时
 			TLSClientConfig:       &tls.Config{InsecureSkipVerify: true},
 		},
 		// 解决StarRocks的FE重定向到BE时认证丢失问题

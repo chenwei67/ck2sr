@@ -42,6 +42,7 @@ type SyncProgress struct {
 	SyncedRows    int64     `json:"synced_rows"`     // 已同步完成的行数（断点偏移量）
 	SyncedBytes   int64     `json:"synced_bytes"`    // 已同步完成的字节数
 	StartSyncTime time.Time `json:"start_sync_time"` // 本次同步开始时间
+	EndSyncTime   time.Time `json:"end_sync_time"`   // 本次同步结束时间
 	LastSyncTime  time.Time `json:"last_sync_time"`  // 最后一次更新时间
 	Progress      float64   `json:"progress"`        // 百分比（0.00-100.00）
 }
