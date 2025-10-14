@@ -149,7 +149,7 @@ func (c *HTTPClient) StreamLoad(ctx context.Context, options *StreamLoadOptions,
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	c.logger.Infof("Stream load response: %+v", loadResp)
+	c.logger.Debugf("Stream load response: %+v", loadResp)
 	if loadResp.Status != "Success" && loadResp.Status != "Publish Timeout" {
 		return &loadResp, fmt.Errorf("stream load failed: %s - %s", loadResp.Status, loadResp.Message)
 	}

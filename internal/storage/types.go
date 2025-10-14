@@ -18,14 +18,14 @@ const (
 // TaskState 任务状态
 // 对应文件：task_${task_id}.json
 type TaskState struct {
-	TaskID        string     `json:"task_id"`         // 任务唯一标识符
-	Status        TaskStatus `json:"status"`          // 任务执行状态（FSM状态）
-	ScheduleTimes int64      `json:"schedule_times"`  // 调度执行计数器
-	FailedTimes   int64      `json:"failed_times"`    // 失败计数器
-	StartedAt     time.Time  `json:"started_at"`      // 首次调度时间戳
-	LastRunTime   time.Time  `json:"last_run_time"`   // 最近调度时间戳
-	UpdatedAt     time.Time  `json:"updated_at"`      // 状态更新时间戳
-	FinishedAt    time.Time  `json:"finished_at"`     // 任务完成时间戳
+	TaskID        string     `json:"task_id"`              // 任务唯一标识符
+	Status        TaskStatus `json:"status"`               // 任务执行状态（FSM状态）
+	ScheduleTimes int64      `json:"schedule_times"`       // 调度执行计数器
+	FailedTimes   int64      `json:"failed_times"`         // 失败计数器
+	StartedAt     time.Time  `json:"started_at"`           // 首次调度时间戳
+	LastRunTime   time.Time  `json:"last_run_time"`        // 最近调度时间戳
+	UpdatedAt     time.Time  `json:"updated_at"`           // 状态更新时间戳
+	FinishedAt    time.Time  `json:"finished_at"`          // 任务完成时间戳
 	LastError     string     `json:"last_error,omitempty"` // 最后错误信息（可选）
 }
 
@@ -33,6 +33,7 @@ type TaskState struct {
 // 对应文件：progress_${task_id}_${table}.json
 type SyncProgress struct {
 	TaskID        string    `json:"task_id"`         // 任务ID
+	Status        string    `json:"status"`          // 进度状态（running, completed, failed）
 	SourceDB      string    `json:"source_db"`       // 源数据库名
 	SourceTable   string    `json:"source_table"`    // 源表名
 	TargetDB      string    `json:"target_db"`       // 目标数据库名

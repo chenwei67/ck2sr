@@ -297,6 +297,7 @@ func (j *DefaultTableSyncJob) queryTotalRows() (int64, error) {
 func (j *DefaultTableSyncJob) saveInitialProgress() error {
 	syncProgress := &storage.SyncProgress{
 		TaskID:        j.taskID,
+		Status:        j.stats.Status,
 		SourceDB:      j.config.Reader.Database, // 源数据库
 		SourceTable:   j.tableName,
 		TargetDB:      j.config.Writer.Database, // 目标数据库
@@ -356,6 +357,7 @@ func (j *DefaultTableSyncJob) saveProgress() error {
 
 	syncProgress := &storage.SyncProgress{
 		TaskID:        j.taskID,
+		Status:        j.stats.Status,
 		SourceDB:      j.config.Reader.Database, // 源数据库
 		SourceTable:   j.tableName,
 		TargetDB:      j.config.Writer.Database, // 目标数据库
@@ -454,10 +456,10 @@ func (j *DefaultTableSyncJob) handleError(err error) {
 	j.stats.Duration = j.stats.EndTime.Sub(j.stats.StartTime)
 	j.stats.ErrorCount++
 
-	// TODO：这里为何还需要更新进度状态？进度状态已经在回调函数onBatchProgress中完成了更新
-	// if saveErr := j.saveProgress(); saveErr != nil {
-	// 	j.logger.Errorf("Failed to save error progress for table %s: %v", j.tableName, saveErr)
-	// }
+	// 尝试保存当前进度状态
+	if saveErr := j.saveProgress(); saveErr != nil {
+		j.logger.Errorf("Failed to save error progress for table %s: %v", j.tableName, saveErr)
+	}
 
 	j.logger.Errorf("Table sync job failed for %s: %v", j.tableName, err)
 }
@@ -470,10 +472,9 @@ func (j *DefaultTableSyncJob) handleSuccess() {
 	j.stats.EndTime = time.Now()
 	j.stats.Duration = j.stats.EndTime.Sub(j.stats.StartTime)
 
-	// TODO：这里为何还需要更新进度状态？进度状态已经在回调函数onBatchProgress中完成了更新
-	// if err := j.saveProgress(); err != nil {
-	// 	j.logger.Errorf("Failed to save final progress for table %s: %v", j.tableName, err)
-	// }
+	if err := j.saveProgress(); err != nil {
+		j.logger.Errorf("Failed to save final progress for table %s: %v", j.tableName, err)
+	}
 
 	j.logger.Infof("Table sync job completed successfully for %s in %v, processed %d rows, %d bytes",
 		j.tableName, j.stats.Duration, j.stats.ProcessedRows, j.stats.ProcessedBytes)

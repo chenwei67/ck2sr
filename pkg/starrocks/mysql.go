@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/sunkaimr/ck2sr/pkg/protocol"
@@ -33,9 +32,11 @@ func NewMySQLClient(config *MySQLConfig) (*MySQLClient, error) {
 
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(time.Hour)
+	db.SetConnMaxLifetime(config.Timeout)
 
-	if err := db.Ping(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to ping starrocks: %w", err)
 	}

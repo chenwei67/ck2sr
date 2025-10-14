@@ -28,7 +28,10 @@
       "Bash(del engine.go)",
       "Bash(ren:*)",
       "Bash(git checkout:*)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(git log:*)",
+      "Read(//d/**)",
+      "Bash(cd:*)"
     ],
     "deny": [],
     "ask": []

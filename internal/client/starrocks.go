@@ -45,6 +45,7 @@ func generateStarRocksConfig(cfg *config.StarRocksConfig) (*starrocks.Config, er
 			Port:     cfg.MySQL.Port,
 			Username: cfg.MySQL.Username,
 			Password: cfg.MySQL.Password,
+			Timeout:  cfg.MySQL.Timeout,
 		}
 	}
 	if cfg.HTTP != nil {
@@ -53,6 +54,7 @@ func generateStarRocksConfig(cfg *config.StarRocksConfig) (*starrocks.Config, er
 			Port:     cfg.HTTP.Port,
 			Username: cfg.HTTP.Username,
 			Password: cfg.HTTP.Password,
+			Timeout:  cfg.HTTP.Timeout,
 		}
 	}
 	if cfg.FlightSQL != nil {
@@ -61,6 +63,7 @@ func generateStarRocksConfig(cfg *config.StarRocksConfig) (*starrocks.Config, er
 			Port:     cfg.FlightSQL.Port,
 			Username: cfg.FlightSQL.Username,
 			Password: cfg.FlightSQL.Password,
+			Timeout:  cfg.FlightSQL.Timeout,
 			TLS: starrocks.TLSConfig{
 				Enabled:    cfg.FlightSQL.TLS.Enabled,
 				SkipVerify: cfg.FlightSQL.TLS.SkipVerify,

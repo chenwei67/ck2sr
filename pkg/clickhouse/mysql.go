@@ -32,8 +32,10 @@ func NewMySQLClient(config *MySQLConfig) (*MySQLClient, error) {
 	db.SetMaxOpenConns(10)
 	db.SetMaxIdleConns(5)
 
+	ctx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
 	// 测试连接
-	if err := db.Ping(); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}

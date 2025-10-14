@@ -540,26 +540,49 @@ func (g *DataGenerator) generateValueForColumn(col ColumnInfo, id int64, r *rand
 }
 
 // generateStarRocksValue 为StarRocks生成值
+// 支持复杂类型：ARRAY、MAP、JSON、STRUCT
 func (g *DataGenerator) generateStarRocksValue(col ColumnInfo, id int64, r *rand.Rand) (interface{}, error) {
-	dataType := strings.ToUpper(col.DataType)
+	dataType := col.DataType // 保留原始大小写用于精确匹配
+	dataTypeUpper := strings.ToUpper(dataType)
 
+	// P0: 处理 ARRAY 类型（StarRocks使用ARRAY<T>语法）
+	if strings.HasPrefix(dataTypeUpper, "ARRAY<") {
+		return g.generateStarRocksArrayValue(dataType, id, r)
+	}
+
+	// P0: 处理 MAP 类型（StarRocks使用MAP<K,V>语法）
+	if strings.HasPrefix(dataTypeUpper, "MAP<") {
+		return g.generateStarRocksMapValue(dataType, id, r)
+	}
+
+	// P0: 处理 STRUCT 类型（类似ClickHouse的Tuple）
+	if strings.HasPrefix(dataTypeUpper, "STRUCT<") {
+		return g.generateStarRocksStructValue(dataType, id, r)
+	}
+
+	// P0: 处理 JSON 类型
+	if dataTypeUpper == "JSON" || strings.Contains(dataTypeUpper, "JSON") {
+		return g.generateJSONValue(col, id, r), nil
+	}
+
+	// 基础类型处理
 	switch {
-	case strings.Contains(dataType, "BIGINT"):
-		return id, nil
-	case strings.Contains(dataType, "INT"):
+	case strings.Contains(dataTypeUpper, "BIGINT"):
+		return time.Now().Unix(), nil
+	case strings.Contains(dataTypeUpper, "INT"):
 		return int32(20 + r.Intn(60)), nil
-	case strings.Contains(dataType, "SMALLINT"):
+	case strings.Contains(dataTypeUpper, "SMALLINT"):
 		return int16(r.Intn(1000)), nil
-	case strings.Contains(dataType, "TINYINT"):
+	case strings.Contains(dataTypeUpper, "TINYINT"):
 		if strings.Contains(col.Name, "active") {
 			return r.Intn(2), nil
 		}
 		return r.Intn(256), nil
-	case strings.Contains(dataType, "VARCHAR"), strings.Contains(dataType, "TEXT"):
+	case strings.Contains(dataTypeUpper, "VARCHAR"), strings.Contains(dataTypeUpper, "TEXT"), strings.Contains(dataTypeUpper, "STRING"):
 		return g.generateStringValue(col, id, r), nil
-	case strings.Contains(dataType, "CHAR"):
+	case strings.Contains(dataTypeUpper, "CHAR"):
 		return g.generateFixedStringValue(col, id, r), nil
-	case strings.Contains(dataType, "DECIMAL"):
+	case strings.Contains(dataTypeUpper, "DECIMAL"):
 		precision := int64(10)
 		scale := int64(2)
 		if col.NumPrecision != nil {
@@ -569,50 +592,322 @@ func (g *DataGenerator) generateStarRocksValue(col ColumnInfo, id int64, r *rand
 			scale = *col.NumScale
 		}
 		return g.generateDecimalValue(precision, scale, r), nil
-	case strings.Contains(dataType, "FLOAT"):
+	case strings.Contains(dataTypeUpper, "FLOAT"):
 		return r.Float32() * 100, nil
-	case strings.Contains(dataType, "DOUBLE"):
+	case strings.Contains(dataTypeUpper, "DOUBLE"):
 		return 50.0 + r.Float64()*100, nil
-	case strings.Contains(dataType, "BOOLEAN"):
+	case strings.Contains(dataTypeUpper, "BOOLEAN"):
 		return r.Intn(2) == 1, nil
-	case strings.Contains(dataType, "DATE"):
+	case strings.Contains(dataTypeUpper, "DATE"):
 		return g.generateDate(r), nil
-	case strings.Contains(dataType, "DATETIME"), strings.Contains(dataType, "TIMESTAMP"):
+	case strings.Contains(dataTypeUpper, "DATETIME"), strings.Contains(dataTypeUpper, "TIMESTAMP"):
 		return g.generateDateTime(r), nil
-	case strings.Contains(dataType, "JSON"):
-		return g.generateJSONValue(col, id, r), nil
 	default:
-		// 默认生成字符串
-		return g.generateStringValue(col, id, r), nil
+		return nil, fmt.Errorf("unsupported StarRocks data type: %s for column: %s", dataType, col.Name)
 	}
 }
 
-// generateClickHouseValue 为ClickHouse生成值
-func (g *DataGenerator) generateClickHouseValue(col ColumnInfo, id int64, r *rand.Rand) (interface{}, error) {
-	dataType := strings.ToUpper(col.DataType)
+// extractStarRocksInnerType 提取StarRocks类型的内部类型
+// StarRocks使用<>而不是()，例如：ARRAY<INT> -> INT, MAP<STRING,INT> -> STRING,INT
+func extractStarRocksInnerType(dataType, wrapper string) string {
+	upperWrapper := strings.ToUpper(wrapper)
+	upperDataType := strings.ToUpper(dataType)
+	prefix := upperWrapper + "<"
 
+	if !strings.HasPrefix(upperDataType, prefix) {
+		return ""
+	}
+
+	// 从原始类型中提取（保留大小写）
+	startIdx := len(prefix)
+	// 找到匹配的右尖括号
+	depth := 1
+	endIdx := startIdx
+	for i := startIdx; i < len(dataType); i++ {
+		if dataType[i] == '<' {
+			depth++
+		} else if dataType[i] == '>' {
+			depth--
+			if depth == 0 {
+				endIdx = i
+				break
+			}
+		}
+	}
+
+	if endIdx <= startIdx {
+		return ""
+	}
+
+	return strings.TrimSpace(dataType[startIdx:endIdx])
+}
+
+// generateStarRocksArrayValue 生成 ARRAY 类型的值（支持嵌套）
+func (g *DataGenerator) generateStarRocksArrayValue(dataType string, id int64, r *rand.Rand) (interface{}, error) {
+	innerType := extractStarRocksInnerType(dataType, "ARRAY")
+	if innerType == "" {
+		return nil, fmt.Errorf("failed to extract inner type from ARRAY: %s", dataType)
+	}
+
+	// 生成数组长度（2-5个元素）
+	arrLen := 2 + r.Intn(4)
+
+	// 根据内部类型生成数组元素
+	innerCol := ColumnInfo{
+		Name:     "array_element",
+		DataType: innerType,
+	}
+
+	var result []interface{}
+	for i := 0; i < arrLen; i++ {
+		value, err := g.generateStarRocksValue(innerCol, id, r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate array element: %w", err)
+		}
+		result = append(result, value)
+	}
+
+	return result, nil
+}
+
+// generateStarRocksMapValue 生成 MAP 类型的值
+func (g *DataGenerator) generateStarRocksMapValue(dataType string, id int64, r *rand.Rand) (interface{}, error) {
+	innerPart := extractStarRocksInnerType(dataType, "MAP")
+	if innerPart == "" {
+		return nil, fmt.Errorf("failed to extract inner types from MAP: %s", dataType)
+	}
+
+	// 分割 Key 和 Value 类型（StarRocks使用逗号分隔）
+	keyType, valueType, err := splitStarRocksMapTypes(innerPart)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse MAP types: %w", err)
+	}
+
+	// 生成 3-5 个键值对
+	mapSize := 3 + r.Intn(3)
+	resultMap := make(map[interface{}]interface{})
+
+	keyCol := ColumnInfo{Name: "map_key", DataType: keyType}
+	valueCol := ColumnInfo{Name: "map_value", DataType: valueType}
+
+	for i := 0; i < mapSize; i++ {
+		key, err := g.generateStarRocksValue(keyCol, id+int64(i), r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate map key: %w", err)
+		}
+		value, err := g.generateStarRocksValue(valueCol, id, r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate map value: %w", err)
+		}
+		resultMap[key] = value
+	}
+
+	return resultMap, nil
+}
+
+// splitStarRocksMapTypes 分割 MAP 的 Key 和 Value 类型
+func splitStarRocksMapTypes(innerPart string) (string, string, error) {
+	depth := 0
+	commaIdx := -1
+
+	for i := 0; i < len(innerPart); i++ {
+		switch innerPart[i] {
+		case '<':
+			depth++
+		case '>':
+			depth--
+		case ',':
+			if depth == 0 {
+				commaIdx = i
+				break
+			}
+		}
+		if commaIdx != -1 {
+			break
+		}
+	}
+
+	if commaIdx == -1 {
+		return "", "", fmt.Errorf("invalid MAP type format: %s", innerPart)
+	}
+
+	keyType := strings.TrimSpace(innerPart[:commaIdx])
+	valueType := strings.TrimSpace(innerPart[commaIdx+1:])
+
+	if keyType == "" || valueType == "" {
+		return "", "", fmt.Errorf("empty key or value type in MAP: %s", innerPart)
+	}
+
+	return keyType, valueType, nil
+}
+
+// generateStarRocksStructValue 生成 STRUCT 类型的值
+// STRUCT<field1:TYPE1, field2:TYPE2>
+func (g *DataGenerator) generateStarRocksStructValue(dataType string, id int64, r *rand.Rand) (interface{}, error) {
+	innerPart := extractStarRocksInnerType(dataType, "STRUCT")
+	if innerPart == "" {
+		return nil, fmt.Errorf("failed to extract inner types from STRUCT: %s", dataType)
+	}
+
+	// 解析 STRUCT 中的字段定义
+	fields, err := splitStarRocksStructFields(innerPart)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse STRUCT fields: %w", err)
+	}
+
+	// STRUCT在StarRocks中表示为JSON对象
+	result := make(map[string]interface{})
+	for fieldName, fieldType := range fields {
+		fieldCol := ColumnInfo{
+			Name:     fieldName,
+			DataType: fieldType,
+		}
+		value, err := g.generateStarRocksValue(fieldCol, id, r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate struct field %s: %w", fieldName, err)
+		}
+		result[fieldName] = value
+	}
+
+	return result, nil
+}
+
+// splitStarRocksStructFields 分割 STRUCT 中的字段定义
+// 例如：field1:INT, field2:STRING -> {"field1": "INT", "field2": "STRING"}
+func splitStarRocksStructFields(innerPart string) (map[string]string, error) {
+	fields := make(map[string]string)
+	depth := 0
+	start := 0
+
+	for i := 0; i <= len(innerPart); i++ {
+		if i < len(innerPart) {
+			switch innerPart[i] {
+			case '<':
+				depth++
+			case '>':
+				depth--
+			case ',':
+				if depth == 0 {
+					fieldDef := strings.TrimSpace(innerPart[start:i])
+					name, typ, err := parseStarRocksStructField(fieldDef)
+					if err != nil {
+						return nil, err
+					}
+					fields[name] = typ
+					start = i + 1
+				}
+			}
+		} else {
+			// 处理最后一个字段
+			if start < len(innerPart) {
+				fieldDef := strings.TrimSpace(innerPart[start:])
+				name, typ, err := parseStarRocksStructField(fieldDef)
+				if err != nil {
+					return nil, err
+				}
+				fields[name] = typ
+			}
+		}
+	}
+
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("no fields found in STRUCT: %s", innerPart)
+	}
+
+	return fields, nil
+}
+
+// parseStarRocksStructField 解析单个STRUCT字段定义
+// 例如：field_name:INT -> ("field_name", "INT")
+func parseStarRocksStructField(fieldDef string) (string, string, error) {
+	colonIdx := strings.Index(fieldDef, ":")
+	if colonIdx == -1 {
+		return "", "", fmt.Errorf("invalid STRUCT field definition: %s", fieldDef)
+	}
+
+	fieldName := strings.TrimSpace(fieldDef[:colonIdx])
+	fieldType := strings.TrimSpace(fieldDef[colonIdx+1:])
+
+	if fieldName == "" || fieldType == "" {
+		return "", "", fmt.Errorf("empty field name or type in: %s", fieldDef)
+	}
+
+	return fieldName, fieldType, nil
+}
+
+// generateClickHouseValue 为ClickHouse生成值
+// 支持复杂类型：Array、Map、JSON、Tuple、Nullable、嵌套类型组合
+func (g *DataGenerator) generateClickHouseValue(col ColumnInfo, id int64, r *rand.Rand) (any, error) {
+	dataType := col.DataType // 保留原始大小写用于精确匹配
+	dataTypeUpper := strings.ToUpper(dataType)
+
+	// P1: 处理 Nullable 包装类型
+	if strings.HasPrefix(dataTypeUpper, "NULLABLE(") {
+		// 10% 概率返回 NULL
+		if r.Float32() < 0.1 {
+			return nil, nil
+		}
+		// 提取内部类型并递归生成
+		innerType := extractInnerType(dataType, "Nullable")
+		if innerType == "" {
+			return nil, fmt.Errorf("failed to extract inner type from Nullable: %s", dataType)
+		}
+		innerCol := ColumnInfo{
+			Name:         col.Name,
+			DataType:     innerType,
+			IsNullable:   false,
+			DefaultValue: col.DefaultValue,
+			CharLength:   col.CharLength,
+			NumPrecision: col.NumPrecision,
+			NumScale:     col.NumScale,
+		}
+		return g.generateClickHouseValue(innerCol, id, r)
+	}
+
+	// P0: 处理 Array 类型（支持嵌套）
+	if strings.HasPrefix(dataTypeUpper, "ARRAY(") {
+		return g.generateArrayValue(dataType, id, r)
+	}
+
+	// P0: 处理 Map 类型
+	if strings.HasPrefix(dataTypeUpper, "MAP(") {
+		return g.generateMapValue(dataType, id, r)
+	}
+
+	// P0: 处理 Tuple 类型
+	if strings.HasPrefix(dataTypeUpper, "TUPLE(") {
+		return g.generateTupleValue(dataType, id, r)
+	}
+
+	// P0: 处理 JSON 类型
+	if dataTypeUpper == "JSON" || strings.Contains(dataTypeUpper, "JSON") {
+		return g.generateJSONValue(col, id, r), nil
+	}
+
+	// 基础类型处理
 	switch {
-	case strings.Contains(dataType, "UINT64"):
+	case strings.Contains(dataTypeUpper, "UINT64"):
 		return uint64(id), nil
-	case strings.Contains(dataType, "UINT32"):
+	case strings.Contains(dataTypeUpper, "UINT32"):
 		return uint32(20 + r.Intn(60)), nil
-	case strings.Contains(dataType, "UINT16"):
+	case strings.Contains(dataTypeUpper, "UINT16"):
 		return uint16(r.Intn(65536)), nil
-	case strings.Contains(dataType, "UINT8"):
+	case strings.Contains(dataTypeUpper, "UINT8"):
 		return uint8(r.Intn(256)), nil
-	case strings.Contains(dataType, "INT64"):
-		return int64(id), nil
-	case strings.Contains(dataType, "INT32"):
+	case strings.Contains(dataTypeUpper, "INT64"):
+		// 特殊处理：时间戳的场景
+		return int64(time.Now().Unix()), nil
+	case strings.Contains(dataTypeUpper, "INT32"):
 		return int32(20 + r.Intn(60)), nil
-	case strings.Contains(dataType, "INT16"):
+	case strings.Contains(dataTypeUpper, "INT16"):
 		return int16(r.Intn(1000)), nil
-	case strings.Contains(dataType, "INT8"):
+	case strings.Contains(dataTypeUpper, "INT8"):
 		return int8(r.Intn(256)), nil
-	case strings.Contains(dataType, "STRING"):
+	case strings.Contains(dataTypeUpper, "STRING"):
 		return g.generateStringValue(col, id, r), nil
-	case strings.Contains(dataType, "FIXEDSTRING"):
+	case strings.Contains(dataTypeUpper, "FIXEDSTRING"):
 		return g.generateFixedStringValue(col, id, r), nil
-	case strings.Contains(dataType, "DECIMAL"):
+	case strings.Contains(dataTypeUpper, "DECIMAL"):
 		precision := int64(10)
 		scale := int64(2)
 		if col.NumPrecision != nil {
@@ -622,18 +917,223 @@ func (g *DataGenerator) generateClickHouseValue(col ColumnInfo, id int64, r *ran
 			scale = *col.NumScale
 		}
 		return g.generateDecimalValue(precision, scale, r), nil
-	case strings.Contains(dataType, "FLOAT32"):
+	case strings.Contains(dataTypeUpper, "FLOAT32"):
 		return r.Float32() * 100, nil
-	case strings.Contains(dataType, "FLOAT64"):
+	case strings.Contains(dataTypeUpper, "FLOAT64"):
 		return r.Float64() * 100, nil
-	case strings.Contains(dataType, "DATE"):
-		return g.generateDate(r), nil
-	case strings.Contains(dataType, "DATETIME"), strings.Contains(dataType, "DATETIME64"):
+	case strings.Contains(dataTypeUpper, "DATETIME"), strings.Contains(dataTypeUpper, "DATETIME64"):
 		return g.generateDateTime(r), nil
+	case strings.Contains(dataTypeUpper, "DATE"):
+		return g.generateDate(r), nil
+	case strings.Contains(dataTypeUpper, "IPV4"):
+		return fmt.Sprintf("%d.%d.%d.%d", r.Intn(256), r.Intn(256), r.Intn(256), r.Intn(256)), nil
+	case strings.Contains(dataTypeUpper, "IPV6"):
+		return fmt.Sprintf("%x:%x:%x:%x:%x:%x:%x:%x",
+			r.Intn(65536), r.Intn(65536), r.Intn(65536), r.Intn(65536),
+			r.Intn(65536), r.Intn(65536), r.Intn(65536), r.Intn(65536)), nil
+	case strings.Contains(dataTypeUpper, "BOOLEAN"), strings.Contains(dataTypeUpper, "BOOL"):
+		return r.Intn(2) == 1, nil
 	default:
-		// 默认生成字符串
-		return g.generateStringValue(col, id, r), nil
+		return nil, fmt.Errorf("unsupported ClickHouse data type: %s for column: %s", dataType, col.Name)
 	}
+}
+
+// extractInnerType 提取包装类型的内部类型
+// 例如：Nullable(String) -> String, Array(Int32) -> Int32
+func extractInnerType(dataType, wrapper string) string {
+	upperWrapper := strings.ToUpper(wrapper)
+	upperDataType := strings.ToUpper(dataType)
+	prefix := upperWrapper + "("
+
+	if !strings.HasPrefix(upperDataType, prefix) {
+		return ""
+	}
+
+	// 从原始类型中提取（保留大小写）
+	startIdx := len(prefix)
+	// 找到匹配的右括号
+	depth := 1
+	endIdx := startIdx
+	for i := startIdx; i < len(dataType); i++ {
+		if dataType[i] == '(' {
+			depth++
+		} else if dataType[i] == ')' {
+			depth--
+			if depth == 0 {
+				endIdx = i
+				break
+			}
+		}
+	}
+
+	if endIdx <= startIdx {
+		return ""
+	}
+
+	return strings.TrimSpace(dataType[startIdx:endIdx])
+}
+
+// generateArrayValue 生成 Array 类型的值（支持嵌套）
+func (g *DataGenerator) generateArrayValue(dataType string, id int64, r *rand.Rand) (interface{}, error) {
+	innerType := extractInnerType(dataType, "Array")
+	if innerType == "" {
+		return nil, fmt.Errorf("failed to extract inner type from Array: %s", dataType)
+	}
+
+	// 生成数组长度（2-5个元素）
+	arrLen := 2 + r.Intn(4)
+
+	// 根据内部类型生成数组元素
+	innerCol := ColumnInfo{
+		Name:     "array_element",
+		DataType: innerType,
+	}
+
+	var result []interface{}
+	for i := 0; i < arrLen; i++ {
+		value, err := g.generateClickHouseValue(innerCol, id, r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate array element: %w", err)
+		}
+		result = append(result, value)
+	}
+
+	return result, nil
+}
+
+// generateMapValue 生成 Map 类型的值
+func (g *DataGenerator) generateMapValue(dataType string, id int64, r *rand.Rand) (interface{}, error) {
+	// 提取 Map 的 Key 和 Value 类型
+	// 例如：Map(String, Int32) -> keyType=String, valueType=Int32
+	innerPart := extractInnerType(dataType, "Map")
+	if innerPart == "" {
+		return nil, fmt.Errorf("failed to extract inner types from Map: %s", dataType)
+	}
+
+	// 分割 Key 和 Value 类型
+	keyType, valueType, err := splitMapTypes(innerPart)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Map types: %w", err)
+	}
+
+	// 生成 3-5 个键值对
+	mapSize := 3 + r.Intn(3)
+	resultMap := make(map[interface{}]interface{})
+
+	keyCol := ColumnInfo{Name: "map_key", DataType: keyType}
+	valueCol := ColumnInfo{Name: "map_value", DataType: valueType}
+
+	for i := 0; i < mapSize; i++ {
+		key, err := g.generateClickHouseValue(keyCol, id+int64(i), r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate map key: %w", err)
+		}
+		value, err := g.generateClickHouseValue(valueCol, id, r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate map value: %w", err)
+		}
+		resultMap[key] = value
+	}
+
+	return resultMap, nil
+}
+
+// splitMapTypes 分割 Map 的 Key 和 Value 类型
+func splitMapTypes(innerPart string) (string, string, error) {
+	depth := 0
+	commaIdx := -1
+
+	for i := 0; i < len(innerPart); i++ {
+		switch innerPart[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				commaIdx = i
+				break
+			}
+		}
+		if commaIdx != -1 {
+			break
+		}
+	}
+
+	if commaIdx == -1 {
+		return "", "", fmt.Errorf("invalid Map type format: %s", innerPart)
+	}
+
+	keyType := strings.TrimSpace(innerPart[:commaIdx])
+	valueType := strings.TrimSpace(innerPart[commaIdx+1:])
+
+	if keyType == "" || valueType == "" {
+		return "", "", fmt.Errorf("empty key or value type in Map: %s", innerPart)
+	}
+
+	return keyType, valueType, nil
+}
+
+// generateTupleValue 生成 Tuple 类型的值
+func (g *DataGenerator) generateTupleValue(dataType string, id int64, r *rand.Rand) (interface{}, error) {
+	innerPart := extractInnerType(dataType, "Tuple")
+	if innerPart == "" {
+		return nil, fmt.Errorf("failed to extract inner types from Tuple: %s", dataType)
+	}
+
+	// 解析 Tuple 中的所有类型
+	types, err := splitTupleTypes(innerPart)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse Tuple types: %w", err)
+	}
+
+	// 生成每个元素
+	var result []interface{}
+	for i, elemType := range types {
+		elemCol := ColumnInfo{
+			Name:     fmt.Sprintf("tuple_elem_%d", i),
+			DataType: elemType,
+		}
+		value, err := g.generateClickHouseValue(elemCol, id, r)
+		if err != nil {
+			return nil, fmt.Errorf("failed to generate tuple element %d: %w", i, err)
+		}
+		result = append(result, value)
+	}
+
+	return result, nil
+}
+
+// splitTupleTypes 分割 Tuple 中的所有类型
+func splitTupleTypes(innerPart string) ([]string, error) {
+	var types []string
+	depth := 0
+	start := 0
+
+	for i := 0; i < len(innerPart); i++ {
+		switch innerPart[i] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+		case ',':
+			if depth == 0 {
+				types = append(types, strings.TrimSpace(innerPart[start:i]))
+				start = i + 1
+			}
+		}
+	}
+
+	// 添加最后一个类型
+	if start < len(innerPart) {
+		types = append(types, strings.TrimSpace(innerPart[start:]))
+	}
+
+	if len(types) == 0 {
+		return nil, fmt.Errorf("no types found in Tuple: %s", innerPart)
+	}
+
+	return types, nil
 }
 
 // 辅助方法生成特定类型的值
@@ -684,7 +1184,8 @@ func (g *DataGenerator) generateDecimalValue(precision, scale int64, r *rand.Ran
 }
 
 func (g *DataGenerator) generateDate(r *rand.Rand) time.Time {
-	return time.Date(1980+r.Intn(40), time.Month(1+r.Intn(12)), 1+r.Intn(28), 0, 0, 0, 0, time.UTC)
+	now := time.Now()
+	return time.Date(now.Year(), now.Month(), now.Day(), r.Intn(24), r.Intn(60), r.Intn(60), 0, time.UTC)
 }
 
 func (g *DataGenerator) generateDateTime(r *rand.Rand) time.Time {
@@ -705,6 +1206,7 @@ func (g *DataGenerator) generateRandomString(length int, r *rand.Rand) string {
 }
 
 // formatValueForClickHouse 为ClickHouse格式化值
+// 支持复杂类型：Array、Map、Tuple、JSON
 func (g *DataGenerator) formatValueForClickHouse(value interface{}, col ColumnInfo) (string, error) {
 	if value == nil {
 		return "NULL", nil
@@ -714,8 +1216,9 @@ func (g *DataGenerator) formatValueForClickHouse(value interface{}, col ColumnIn
 
 	switch v := value.(type) {
 	case string:
-		// 转义单引号
-		escaped := strings.ReplaceAll(v, "'", "\\'")
+		// 转义单引号和反斜杠
+		escaped := strings.ReplaceAll(v, "\\", "\\\\")
+		escaped = strings.ReplaceAll(escaped, "'", "\\'")
 		return fmt.Sprintf("'%s'", escaped), nil
 	case time.Time:
 		if strings.Contains(dataType, "DATE") && !strings.Contains(dataType, "DATETIME") {
@@ -727,15 +1230,112 @@ func (g *DataGenerator) formatValueForClickHouse(value interface{}, col ColumnIn
 			return "1", nil
 		}
 		return "0", nil
-	case float32, float64:
+	case []interface{}:
+		// 处理 Array 或 Tuple 类型
+		if strings.HasPrefix(dataType, "TUPLE(") {
+			return g.formatTupleValue(v, col.DataType)
+		}
+		return g.formatArrayValue(v, col.DataType)
+	case map[interface{}]interface{}:
+		// 处理 Map 类型
+		return g.formatMapValue(v, col.DataType)
+	case float32:
+		return fmt.Sprintf("%v", v), nil
+	case float64:
+		return fmt.Sprintf("%v", v), nil
+	case uint8, uint16, uint32, uint64, int8, int16, int32, int64:
 		return fmt.Sprintf("%v", v), nil
 	default:
-		// 数值类型直接返回
 		return fmt.Sprintf("%v", v), nil
 	}
 }
 
+// formatArrayValue 格式化 Array 类型的值
+// 例如：[1, 2, 3] -> '[1,2,3]', ['a', 'b'] -> "['a','b']"
+func (g *DataGenerator) formatArrayValue(arr []interface{}, dataType string) (string, error) {
+	if len(arr) == 0 {
+		return "[]", nil
+	}
+
+	innerType := extractInnerType(dataType, "Array")
+	innerCol := ColumnInfo{DataType: innerType}
+
+	var elements []string
+	for _, elem := range arr {
+		formatted, err := g.formatValueForClickHouse(elem, innerCol)
+		if err != nil {
+			return "", fmt.Errorf("failed to format array element: %w", err)
+		}
+		elements = append(elements, formatted)
+	}
+
+	return fmt.Sprintf("[%s]", strings.Join(elements, ",")), nil
+}
+
+// formatMapValue 格式化 Map 类型的值
+// 例如：{'key1': 1, 'key2': 2}
+func (g *DataGenerator) formatMapValue(m map[interface{}]interface{}, dataType string) (string, error) {
+	if len(m) == 0 {
+		return "{}", nil
+	}
+
+	innerPart := extractInnerType(dataType, "Map")
+	keyType, valueType, err := splitMapTypes(innerPart)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse Map types: %w", err)
+	}
+
+	keyCol := ColumnInfo{DataType: keyType}
+	valueCol := ColumnInfo{DataType: valueType}
+
+	var pairs []string
+	for k, v := range m {
+		formattedKey, err := g.formatValueForClickHouse(k, keyCol)
+		if err != nil {
+			return "", fmt.Errorf("failed to format map key: %w", err)
+		}
+		formattedValue, err := g.formatValueForClickHouse(v, valueCol)
+		if err != nil {
+			return "", fmt.Errorf("failed to format map value: %w", err)
+		}
+		pairs = append(pairs, fmt.Sprintf("%s:%s", formattedKey, formattedValue))
+	}
+
+	return fmt.Sprintf("{%s}", strings.Join(pairs, ",")), nil
+}
+
+// formatTupleValue 格式化 Tuple 类型的值
+// 例如：('str', 123, 45.6)
+func (g *DataGenerator) formatTupleValue(tuple []interface{}, dataType string) (string, error) {
+	if len(tuple) == 0 {
+		return "()", nil
+	}
+
+	innerPart := extractInnerType(dataType, "Tuple")
+	types, err := splitTupleTypes(innerPart)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse Tuple types: %w", err)
+	}
+
+	if len(tuple) != len(types) {
+		return "", fmt.Errorf("tuple length mismatch: got %d elements, expected %d", len(tuple), len(types))
+	}
+
+	var elements []string
+	for i, elem := range tuple {
+		elemCol := ColumnInfo{DataType: types[i]}
+		formatted, err := g.formatValueForClickHouse(elem, elemCol)
+		if err != nil {
+			return "", fmt.Errorf("failed to format tuple element %d: %w", i, err)
+		}
+		elements = append(elements, formatted)
+	}
+
+	return fmt.Sprintf("(%s)", strings.Join(elements, ",")), nil
+}
+
 // formatValueForStarRocks 为StarRocks格式化值
+// 支持复杂类型：ARRAY、MAP、STRUCT、JSON
 func (g *DataGenerator) formatValueForStarRocks(value interface{}, col ColumnInfo) (string, error) {
 	if value == nil {
 		return "NULL", nil
@@ -745,8 +1345,9 @@ func (g *DataGenerator) formatValueForStarRocks(value interface{}, col ColumnInf
 
 	switch v := value.(type) {
 	case string:
-		// 转义单引号
-		escaped := strings.ReplaceAll(v, "'", "\\'")
+		// 转义单引号和反斜杠
+		escaped := strings.ReplaceAll(v, "\\", "\\\\")
+		escaped = strings.ReplaceAll(escaped, "'", "\\'")
 		return fmt.Sprintf("'%s'", escaped), nil
 	case time.Time:
 		if strings.Contains(dataType, "DATE") && !strings.Contains(dataType, "DATETIME") {
@@ -755,12 +1356,116 @@ func (g *DataGenerator) formatValueForStarRocks(value interface{}, col ColumnInf
 		return fmt.Sprintf("'%s'", v.Format("2006-01-02 15:04:05")), nil
 	case bool:
 		return fmt.Sprintf("%t", v), nil
-	case float32, float64:
+	case []interface{}:
+		// 处理 ARRAY 类型
+		return g.formatStarRocksArrayValue(v, col.DataType)
+	case map[interface{}]interface{}:
+		// 处理 MAP 类型
+		return g.formatStarRocksMapValue(v, col.DataType)
+	case map[string]interface{}:
+		// 处理 STRUCT 类型（表示为JSON对象）
+		return g.formatStarRocksStructValue(v, col.DataType)
+	case float32:
+		return fmt.Sprintf("%v", v), nil
+	case float64:
+		return fmt.Sprintf("%v", v), nil
+	case uint8, uint16, uint32, uint64, int8, int16, int32, int64:
 		return fmt.Sprintf("%v", v), nil
 	default:
 		// 数值类型直接返回
 		return fmt.Sprintf("%v", v), nil
 	}
+}
+
+// formatStarRocksArrayValue 格式化 ARRAY 类型的值
+// 例如：[1, 2, 3] -> '[1,2,3]', ['a', 'b'] -> "['a','b']"
+func (g *DataGenerator) formatStarRocksArrayValue(arr []interface{}, dataType string) (string, error) {
+	if len(arr) == 0 {
+		return "[]", nil
+	}
+
+	innerType := extractStarRocksInnerType(dataType, "ARRAY")
+	innerCol := ColumnInfo{DataType: innerType}
+
+	var elements []string
+	for _, elem := range arr {
+		formatted, err := g.formatValueForStarRocks(elem, innerCol)
+		if err != nil {
+			return "", fmt.Errorf("failed to format array element: %w", err)
+		}
+		elements = append(elements, formatted)
+	}
+
+	return fmt.Sprintf("[%s]", strings.Join(elements, ",")), nil
+}
+
+// formatStarRocksMapValue 格式化 MAP 类型的值
+// 例如：{'key1': 1, 'key2': 2}
+func (g *DataGenerator) formatStarRocksMapValue(m map[interface{}]interface{}, dataType string) (string, error) {
+	if len(m) == 0 {
+		return "{}", nil
+	}
+
+	innerPart := extractStarRocksInnerType(dataType, "MAP")
+	keyType, valueType, err := splitStarRocksMapTypes(innerPart)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse MAP types: %w", err)
+	}
+
+	keyCol := ColumnInfo{DataType: keyType}
+	valueCol := ColumnInfo{DataType: valueType}
+
+	var pairs []string
+	for k, v := range m {
+		formattedKey, err := g.formatValueForStarRocks(k, keyCol)
+		if err != nil {
+			return "", fmt.Errorf("failed to format map key: %w", err)
+		}
+		formattedValue, err := g.formatValueForStarRocks(v, valueCol)
+		if err != nil {
+			return "", fmt.Errorf("failed to format map value: %w", err)
+		}
+		pairs = append(pairs, fmt.Sprintf("%s:%s", formattedKey, formattedValue))
+	}
+
+	return fmt.Sprintf("{%s}", strings.Join(pairs, ",")), nil
+}
+
+// formatStarRocksStructValue 格式化 STRUCT 类型的值
+// STRUCT在StarRocks中表示为JSON对象
+func (g *DataGenerator) formatStarRocksStructValue(structMap map[string]interface{}, dataType string) (string, error) {
+	if len(structMap) == 0 {
+		return "{}", nil
+	}
+
+	innerPart := extractStarRocksInnerType(dataType, "STRUCT")
+	if innerPart == "" {
+		return "", fmt.Errorf("failed to extract STRUCT field types from: %s", dataType)
+	}
+
+	// 解析字段类型
+	fields, err := splitStarRocksStructFields(innerPart)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse STRUCT fields: %w", err)
+	}
+
+	var pairs []string
+	for fieldName, fieldValue := range structMap {
+		// 查找字段类型
+		fieldType, ok := fields[fieldName]
+		if !ok {
+			return "", fmt.Errorf("unknown field %s in STRUCT", fieldName)
+		}
+
+		fieldCol := ColumnInfo{DataType: fieldType}
+		formatted, err := g.formatValueForStarRocks(fieldValue, fieldCol)
+		if err != nil {
+			return "", fmt.Errorf("failed to format struct field %s: %w", fieldName, err)
+		}
+		pairs = append(pairs, fmt.Sprintf("'%s':%s", fieldName, formatted))
+	}
+
+	return fmt.Sprintf("{%s}", strings.Join(pairs, ",")), nil
 }
 
 // insertClickHouseBatch ClickHouse批量插入
@@ -804,6 +1509,7 @@ func (g *DataGenerator) insertClickHouseBatch(batchData [][]interface{}) error {
 	g.logger.Debugf("ClickHouse Insert SQL: %s", insertSQL)
 
 	if _, err := g.db.ExecContext(g.ctx, insertSQL); err != nil {
+		g.logger.Errorf("ClickHouse Insert Failed SQL: %s", insertSQL)
 		return err
 	}
 

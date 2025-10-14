@@ -326,45 +326,4 @@ func (t *SyncTask) logTaskConfiguration() {
 	}
 }
 
-func (t *SyncTask) saveProgress(ctx context.Context) error {
-	t.jobsMu.RLock()
-	defer t.jobsMu.RUnlock()
-
-	for tableName, job := range t.jobs {
-		progress := job.GetProgress()
-		if progress == nil {
-			continue
-		}
-
-		// 转换为存储格式
-		syncProgress := &storage.SyncProgress{
-			TaskID:       t.config.TaskID,
-			SourceTable:  tableName,
-			TargetTable:  tableName,
-			TotalRows:    progress.TotalRows,
-			SyncedRows:   progress.ProcessedRows,
-			SyncedBytes:  progress.ProcessedBytes,
-			LastSyncTime: progress.LastSyncTime,
-		}
-
-		// 计算进度百分比
-		if progress.TotalRows > 0 {
-			syncProgress.Progress = float64(progress.ProcessedRows) / float64(progress.TotalRows) * 100.0
-			// 保留两位小数
-			syncProgress.Progress = float64(int(syncProgress.Progress*100+0.5)) / 100
-		}
-
-		if progress.Status == "completed" {
-			syncProgress.Progress = 100
-		}
-
-		// 保存到存储
-		if err := t.storage.SaveSyncProgress(ctx, syncProgress); err != nil {
-			return fmt.Errorf("failed to save progress for table %s: %w", tableName, err)
-		}
-	}
-
-	return nil
-}
-
 var _ scheduler.TaskExecutor = (*SyncTask)(nil)

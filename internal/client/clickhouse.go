@@ -44,6 +44,7 @@ func generateClickHouseConfig(cfg *config.ClickHouseConfig) (*clickhouse.Config,
 			Port:     cfg.MySQL.Port,
 			Username: cfg.MySQL.Username,
 			Password: cfg.MySQL.Password,
+			Timeout:  cfg.MySQL.Timeout,
 		}
 	}
 	if cfg.HTTP != nil {
@@ -52,6 +53,7 @@ func generateClickHouseConfig(cfg *config.ClickHouseConfig) (*clickhouse.Config,
 			Port:     cfg.HTTP.Port,
 			Username: cfg.HTTP.Username,
 			Password: cfg.HTTP.Password,
+			Timeout:  cfg.HTTP.Timeout,
 		}
 	}
 	if c.MySQL == nil && c.HTTP == nil {
