@@ -388,6 +388,11 @@ func validateService(config *Config) error {
 	if config.Service.GracefulShutdownTimeout <= 0 {
 		return fmt.Errorf("graceful_shutdown_timeout must be positive")
 	}
+	if config.Service.ListenPort < 0 {
+		return fmt.Errorf("listen_port must be positive")
+	} else if config.Service.ListenPort == 0 {
+		config.Service.ListenPort = 8080
+	}
 
 	return nil
 }

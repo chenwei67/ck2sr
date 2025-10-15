@@ -166,6 +166,8 @@ type LogConfig struct {
 // 服务配置
 type ServiceConfig struct {
 	StoragePath             string        `yaml:"storage_path"`
+	ListenPort              int           `yaml:"listen_port"`  // 服务监听端口，默认8080
+	PProfEnable             bool          `yaml:"pprof_enable"` // 开启性能监控
 	HeartbeatInterval       time.Duration `yaml:"heartbeat_interval"`
 	GracefulShutdownTimeout time.Duration `yaml:"graceful_shutdown_timeout"`
 }
