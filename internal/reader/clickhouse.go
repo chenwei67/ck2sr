@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 
@@ -117,12 +118,7 @@ func (r *ClickHouseMySQLReader) GetRecord() (interface{}, error) {
 			r.logger.Debugf("Column %s is filterd, skipping", columnName)
 			continue
 		}
-		// 检查是否是固定值列
-		if nv, ok := r.fixedValues[columnName]; ok {
-			r.logger.Debugf("Column %s is fixed value", columnName)
-			record[columnName] = nv
-			continue
-		}
+
 		// 正确处理不同数据类型，特别是字节数组和数组类型
 		switch v := val.(type) {
 		case []byte:
@@ -152,6 +148,9 @@ func (r *ClickHouseMySQLReader) GetRecord() (interface{}, error) {
 			record[columnName] = fmt.Sprintf("%v", v)
 		}
 	}
+
+	// 修改或者添加固定列
+	maps.Copy(record, r.fixedValues)
 
 	return record, nil
 }

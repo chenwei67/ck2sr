@@ -310,18 +310,6 @@ func validateSyncSettings(settings *SyncSettingsConfig, taskID string) error {
 		return fmt.Errorf("task %s: parallel_tables must be positive", taskID)
 	}
 
-	// 验证时间格式
-	if settings.DataRange.StartTime != "" {
-		if _, err := time.Parse("2006-01-02 15:04:05", settings.DataRange.StartTime); err != nil {
-			return fmt.Errorf("task %s: invalid start_time format, use 'YYYY-MM-DD HH:MM:SS'", taskID)
-		}
-	}
-	if settings.DataRange.EndTime != "" {
-		if _, err := time.Parse("2006-01-02 15:04:05", settings.DataRange.EndTime); err != nil {
-			return fmt.Errorf("task %s: invalid end_time format, use 'YYYY-MM-DD HH:MM:SS'", taskID)
-		}
-	}
-
 	return nil
 }
 

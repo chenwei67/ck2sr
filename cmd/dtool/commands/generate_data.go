@@ -570,7 +570,7 @@ func (g *DataGenerator) generateStarRocksValue(col ColumnInfo, id int64, r *rand
 	case strings.Contains(dataTypeUpper, "BIGINT"):
 		return time.Now().Unix(), nil
 	case strings.Contains(dataTypeUpper, "INT"):
-		return int32(20 + r.Intn(60)), nil
+		return time.Now().Unix(), nil
 	case strings.Contains(dataTypeUpper, "SMALLINT"):
 		return int16(r.Intn(1000)), nil
 	case strings.Contains(dataTypeUpper, "TINYINT"):
@@ -887,9 +887,11 @@ func (g *DataGenerator) generateClickHouseValue(col ColumnInfo, id int64, r *ran
 	// 基础类型处理
 	switch {
 	case strings.Contains(dataTypeUpper, "UINT64"):
-		return uint64(id), nil
+		// 特殊处理：时间戳的场景
+		return int64(time.Now().Unix()), nil
 	case strings.Contains(dataTypeUpper, "UINT32"):
-		return uint32(20 + r.Intn(60)), nil
+		// 特殊处理：时间戳的场景
+		return int64(time.Now().Unix()), nil
 	case strings.Contains(dataTypeUpper, "UINT16"):
 		return uint16(r.Intn(65536)), nil
 	case strings.Contains(dataTypeUpper, "UINT8"):
@@ -898,7 +900,8 @@ func (g *DataGenerator) generateClickHouseValue(col ColumnInfo, id int64, r *ran
 		// 特殊处理：时间戳的场景
 		return int64(time.Now().Unix()), nil
 	case strings.Contains(dataTypeUpper, "INT32"):
-		return int32(20 + r.Intn(60)), nil
+		// 特殊处理：时间戳的场景
+		return int64(time.Now().Unix()), nil
 	case strings.Contains(dataTypeUpper, "INT16"):
 		return int16(r.Intn(1000)), nil
 	case strings.Contains(dataTypeUpper, "INT8"):
