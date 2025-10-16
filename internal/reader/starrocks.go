@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"strconv"
 	"strings"
 
@@ -26,6 +25,11 @@ type StarRocksMySQLReader struct {
 	query          string                 // SQL查询语句
 	excludeColumns []string               // 排除的列
 	fixedValues    map[string]interface{} // 固定值列
+
+	// P0 优化：引入强类型记录和对象池
+	columnMetadata *ColumnMetadata // 列元数据（所有记录共享）
+	recordPool     *RecordPool     // 记录对象池
+	initialized    bool            // 是否已初始化列元数据
 }
 
 func NewStarRocksMySQLReader(cfg *config.DataSourceConfig, cli *starrocks.MySQLClient, logger *logrus.Logger) (*StarRocksMySQLReader, error) {
@@ -81,73 +85,94 @@ func (r *StarRocksMySQLReader) Next() bool {
 }
 
 // GetRecord 获取当前记录
-// 返回interface{}类型的记录数据，通常为map[string]interface{}
+// P0 优化：使用强类型 Record + 对象池 + 延迟 JSON 解析
 func (r *StarRocksMySQLReader) GetRecord() (interface{}, error) {
 	if r.rows == nil {
 		return nil, fmt.Errorf("no active rows")
 	}
 
-	columns, err := r.rows.Columns()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get columns: %w", err)
+	// 延迟初始化列元数据（仅第一次调用时）
+	if !r.initialized {
+		if err := r.initializeColumnMetadata(); err != nil {
+			return nil, fmt.Errorf("failed to initialize column metadata: %w", err)
+		}
+		r.initialized = true
 	}
 
-	values := make([]interface{}, len(columns))
-	valuePtrs := make([]interface{}, len(columns))
-	for i := range values {
-		valuePtrs[i] = &values[i]
+	// 从对象池获取 Record
+	record := r.recordPool.Get()
+
+	// 准备 Scan 目标
+	valuePtrs := make([]interface{}, len(record.Values))
+	for i := range record.Values {
+		valuePtrs[i] = &record.Values[i]
 	}
 
+	// 扫描行数据
 	if err := r.rows.Scan(valuePtrs...); err != nil {
+		r.recordPool.Put(record) // 归还对象池
 		return nil, fmt.Errorf("failed to scan row: %w", err)
 	}
 
-	// 构建记录map，应用列过滤
-	record := make(map[string]interface{})
-	for i, val := range values {
-		columnName := columns[i]
+	// 处理列过滤和类型转换
+	for i, val := range record.Values {
+		columnName := r.columnMetadata.Names[i]
+
+		// NULL 值处理
 		if val == nil {
 			r.logger.Debugf("Column %s is NULL, skipping", columnName)
 			continue
 		}
+
 		// 检查是否在排除列表中
 		if r.isColumnExcluded(columnName) {
 			r.logger.Debugf("Column %s is filtered, skipping", columnName)
+			record.Values[i] = nil
 			continue
 		}
 
-		// 正确处理不同数据类型，特别是字节数组和数组类型
+		// P0 优化方案2+3：类型转换优化
 		switch v := val.(type) {
 		case []byte:
+			// P3 优化：JSON/Array 延迟解析
 			strVal := string(v)
-			// 尝试解析为数组或JSON对象
-			parsedVal, err := r.parseArrayOrJSON(strVal)
-			if err == nil {
-				// 成功解析为数组或对象，使用解析后的值
-				record[columnName] = parsedVal
+			if r.isJSONOrArray(strVal) {
+				// 保存为 RawValue，延迟到 Writer 端处理
+				record.Values[i] = RawValue{
+					IsJSON: r.isJSON(strVal),
+					Data:   v, // 直接使用字节数组，避免字符串拷贝
+				}
 			} else {
-				// 解析失败，作为普通字符串处理
-				record[columnName] = strVal
+				record.Values[i] = strVal
 			}
+
 		case string:
-			// 字符串类型，尝试解析为数组或JSON对象
-			parsedVal, err := r.parseArrayOrJSON(v)
-			if err == nil {
-				record[columnName] = parsedVal
+			// P3 优化：JSON/Array 延迟解析
+			if r.isJSONOrArray(v) {
+				record.Values[i] = RawValue{
+					IsJSON: r.isJSON(v),
+					Data:   []byte(v),
+				}
 			} else {
-				record[columnName] = v
+				record.Values[i] = v
 			}
+
 		case int64, int32, int16, int8, int, uint64, uint32, uint16, uint8, uint, float32, float64, bool:
-			// 整数类型直接使用
-			record[columnName] = v
+			// 数值类型直接使用
+			record.Values[i] = v
+
 		default:
 			// 其他类型转换为字符串
-			record[columnName] = fmt.Sprintf("%v", v)
+			record.Values[i] = fmt.Sprintf("%v", v)
 		}
 	}
 
-	// 固定值覆盖
-	maps.Copy(record, r.fixedValues)
+	// 应用固定值列（如果有）
+	for colName, fixedVal := range r.fixedValues {
+		if err := record.Set(colName, fixedVal); err != nil {
+			r.logger.Warnf("Failed to set fixed value for column %s: %v", colName, err)
+		}
+	}
 
 	return record, nil
 }
@@ -157,6 +182,88 @@ func (r *StarRocksMySQLReader) Close() error {
 		return r.rows.Close()
 	}
 	return nil
+}
+
+// initializeColumnMetadata 初始化列元数据（延迟初始化，仅调用一次）
+func (r *StarRocksMySQLReader) initializeColumnMetadata() error {
+	if r.rows == nil {
+		return fmt.Errorf("no active rows to initialize metadata")
+	}
+
+	// 获取列名
+	columns, err := r.rows.Columns()
+	if err != nil {
+		return fmt.Errorf("failed to get columns: %w", err)
+	}
+
+	// 获取列类型
+	columnTypes, err := r.rows.ColumnTypes()
+	if err != nil {
+		return fmt.Errorf("failed to get column types: %w", err)
+	}
+
+	// 构建列类型名称列表
+	dataTypes := make([]string, len(columnTypes))
+	for i, ct := range columnTypes {
+		dataTypes[i] = ct.DatabaseTypeName()
+	}
+
+	// 创建共享的列元数据
+	r.columnMetadata = NewColumnMetadata(columns, dataTypes)
+
+	// 创建记录对象池
+	r.recordPool = NewRecordPool(r.columnMetadata)
+
+	r.logger.Infof("Initialized column metadata: %d columns", len(columns))
+	return nil
+}
+
+// isJSONOrArray 检查字符串是否为 JSON 或 Array 格式
+func (r *StarRocksMySQLReader) isJSONOrArray(value string) bool {
+	if len(value) == 0 {
+		return false
+	}
+
+	// 去除前后空白
+	value = strings.TrimSpace(value)
+
+	// 检查是否以 { 或 [ 开头（JSON object/array 或 StarRocks array）
+	firstChar := value[0]
+	return firstChar == '{' || firstChar == '['
+}
+
+// isJSON 检查字符串是否为标准 JSON 格式（而非 StarRocks 数组格式）
+func (r *StarRocksMySQLReader) isJSON(value string) bool {
+	if len(value) == 0 {
+		return false
+	}
+
+	value = strings.TrimSpace(value)
+
+	// JSON object: 以 { 开头
+	if value[0] == '{' {
+		return true
+	}
+
+	// JSON array vs StarRocks array:
+	// StarRocks: ['item1','item2'] or [1,2,3]
+	// JSON: ["item1","item2"] or [1,2,3]
+	// 简单启发式：如果包含双引号，判定为 JSON；如果包含单引号，判定为 StarRocks array
+	if value[0] == '[' {
+		// 尝试快速解析判断
+		// JSON 标准使用双引号，StarRocks 数组通常使用单引号
+		if strings.Contains(value, "\"") {
+			return true
+		}
+		// 如果没有引号（纯数字数组），尝试 JSON 解析验证
+		if !strings.Contains(value, "'") {
+			var temp interface{}
+			return json.Unmarshal([]byte(value), &temp) == nil
+		}
+		return false
+	}
+
+	return false
 }
 
 // isColumnExcluded 检查列是否在排除列表中
@@ -196,6 +303,7 @@ func (r *StarRocksMySQLReader) parseArrayOrJSON(value string) (interface{}, erro
 
 // parseStarRocksArray 解析StarRocks数组格式
 // 支持格式：['item1','item2'] 或 [1,2,3] 等
+// P0 优化方案2：预分配切片容量，避免动态扩容
 func (r *StarRocksMySQLReader) parseStarRocksArray(value string) (interface{}, error) {
 	// 移除外层的方括号
 	inner := strings.TrimSpace(value[1 : len(value)-1])
@@ -203,9 +311,14 @@ func (r *StarRocksMySQLReader) parseStarRocksArray(value string) (interface{}, e
 		return []interface{}{}, nil // 空数组
 	}
 
-	// 简单的逗号分割解析
+	// P0 方案2优化：预估数组元素个数，预分配容量
+	// 通过统计逗号数量估算元素数量（逗号数 + 1）
+	estimatedLen := strings.Count(inner, ",") + 1
 	items := r.splitArrayItems(inner)
-	result := make([]interface{}, len(items))
+
+	// 使用预估容量初始化结果切片，避免 bytes.growSlice 开销
+	result := make([]interface{}, 0, estimatedLen)
+	result = result[:len(items)] // 设置实际长度
 
 	for i, item := range items {
 		item = strings.TrimSpace(item)

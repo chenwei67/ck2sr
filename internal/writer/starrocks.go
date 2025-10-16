@@ -42,6 +42,8 @@ func (w *StarRocksHTTPWriter) SetTable(table string) ExecutableWriter {
 
 // Write 写入一批记录到缓冲区
 // records: 记录切片，每个记录为interface{}类型
+// P0 优化方案3：利用 Record.MarshalJSON() 避免二次序列化
+// Reader端返回的Record已包含RawValue，MarshalJSON会直接写入JSON字节，无需解析
 func (w *StarRocksHTTPWriter) Write(ctx context.Context, records interface{}) error {
 	options := &starrocks.StreamLoadOptions{
 		Database: w.config.Database,
@@ -49,6 +51,8 @@ func (w *StarRocksHTTPWriter) Write(ctx context.Context, records interface{}) er
 		Format:   "json",
 	}
 
+	// P0 优化：json.Marshal会调用Record.MarshalJSON()
+	// RawValue字段会被直接写入，避免二次JSON序列化
 	data, err := json.Marshal(records)
 	if err != nil {
 		return fmt.Errorf("failed to marshal record: %w", err)
