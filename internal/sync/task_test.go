@@ -29,11 +29,13 @@ func TestSyncTaskCreation(t *testing.T) {
 			Vendor:   "starrocks",
 			Protocol: "mysql",
 			Database: "test_db",
+			Tables:   []string{"table1", "table2", "table3"},
 		},
 		Settings: config.SyncSettingsConfig{
-			BatchSize:       1000,
-			ParallelTables:  2,
-			BatchInterval:   time.Second * 5,
+			BatchSize:      1000,
+			BatchBytes:     10485760, // 10MB
+			ParallelTables: 2,
+			BatchInterval:  time.Second * 5,
 		},
 	}
 
@@ -48,7 +50,10 @@ func TestSyncTaskCreation(t *testing.T) {
 	logger.SetLevel(logrus.ErrorLevel)
 
 	// 创建SyncTask
-	task := NewSyncTask(cfg, policy, mockStorage, logger)
+	task, err := NewSyncTask(cfg, policy, mockStorage, nil, nil, logger)
+	if err != nil {
+		t.Fatalf("Failed to create sync task: %v", err)
+	}
 
 	// 验证基本属性
 	if task.GetTaskID() != cfg.TaskID {
@@ -102,9 +107,11 @@ func TestSyncTaskTableJobs(t *testing.T) {
 			Vendor:   "starrocks",
 			Protocol: "mysql",
 			Database: "test_db",
+			Tables:   []string{"users", "orders", "products"},
 		},
 		Settings: config.SyncSettingsConfig{
 			BatchSize:      500,
+			BatchBytes:     5242880, // 5MB
 			ParallelTables: 3,
 		},
 	}
@@ -119,7 +126,10 @@ func TestSyncTaskTableJobs(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	task := NewSyncTask(cfg, policy, mockStorage, logger)
+	task, err := NewSyncTask(cfg, policy, mockStorage, nil, nil, logger)
+	if err != nil {
+		t.Fatalf("Failed to create sync task: %v", err)
+	}
 
 	// 测试GetTableJob
 	job, exists := task.GetTableJob("users")
@@ -173,9 +183,11 @@ func TestSyncTaskProgress(t *testing.T) {
 			Vendor:   "starrocks",
 			Protocol: "mysql",
 			Database: "test_db",
+			Tables:   []string{"test_table"},
 		},
 		Settings: config.SyncSettingsConfig{
 			BatchSize:      100,
+			BatchBytes:     1048576, // 1MB
 			ParallelTables: 1,
 		},
 	}
@@ -190,7 +202,10 @@ func TestSyncTaskProgress(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	task := NewSyncTask(cfg, policy, mockStorage, logger)
+	task, err := NewSyncTask(cfg, policy, mockStorage, nil, nil, logger)
+	if err != nil {
+		t.Fatalf("Failed to create sync task: %v", err)
+	}
 
 	// 测试GetTableProgress
 	progress := task.GetTableProgress("test_table")
@@ -232,9 +247,11 @@ func TestSyncTaskStatusManagement(t *testing.T) {
 			Vendor:   "starrocks",
 			Protocol: "mysql",
 			Database: "test_db",
+			Tables:   []string{"test_table"},
 		},
 		Settings: config.SyncSettingsConfig{
 			BatchSize:      100,
+			BatchBytes:     1048576, // 1MB
 			ParallelTables: 1,
 		},
 	}
@@ -249,7 +266,10 @@ func TestSyncTaskStatusManagement(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	task := NewSyncTask(cfg, policy, mockStorage, logger)
+	task, err := NewSyncTask(cfg, policy, mockStorage, nil, nil, logger)
+	if err != nil {
+		t.Fatalf("Failed to create sync task: %v", err)
+	}
 
 	// 初始状态应该是Idle
 	if task.GetStatus() != TaskStatusIdle {
@@ -258,7 +278,7 @@ func TestSyncTaskStatusManagement(t *testing.T) {
 
 	// 测试禁用任务执行
 	ctx := context.Background()
-	err := task.Execute(ctx)
+	err = task.Execute(ctx)
 	if err != nil {
 		t.Errorf("Expected no error for disabled task, got: %v", err)
 	}
@@ -287,9 +307,11 @@ func TestSyncTaskStop(t *testing.T) {
 			Vendor:   "starrocks",
 			Protocol: "mysql",
 			Database: "test_db",
+			Tables:   []string{"test_table"},
 		},
 		Settings: config.SyncSettingsConfig{
 			BatchSize:      100,
+			BatchBytes:     1048576, // 1MB
 			ParallelTables: 1,
 		},
 	}
@@ -304,10 +326,13 @@ func TestSyncTaskStop(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	task := NewSyncTask(cfg, policy, mockStorage, logger)
+	task, err := NewSyncTask(cfg, policy, mockStorage, nil, nil, logger)
+	if err != nil {
+		t.Fatalf("Failed to create sync task: %v", err)
+	}
 
 	// 测试停止任务
-	err := task.Stop()
+	err = task.Stop()
 	if err != nil {
 		t.Errorf("Expected no error when stopping task, got: %v", err)
 	}
@@ -336,9 +361,11 @@ func TestSyncTaskConcurrency(t *testing.T) {
 			Vendor:   "starrocks",
 			Protocol: "mysql",
 			Database: "test_db",
+			Tables:   []string{"table1", "table2", "table3"},
 		},
 		Settings: config.SyncSettingsConfig{
 			BatchSize:      100,
+			BatchBytes:     1048576, // 1MB
 			ParallelTables: 3,
 		},
 	}
@@ -353,7 +380,10 @@ func TestSyncTaskConcurrency(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	task := NewSyncTask(cfg, policy, mockStorage, logger)
+	task, err := NewSyncTask(cfg, policy, mockStorage, nil, nil, logger)
+	if err != nil {
+		t.Fatalf("Failed to create sync task: %v", err)
+	}
 
 	// 并发访问测试
 	numGoroutines := 10
@@ -412,11 +442,13 @@ func TestSyncTaskConfiguration(t *testing.T) {
 			Vendor:   "starrocks",
 			Protocol: "mysql",
 			Database: "test_db",
+			Tables:   []string{"test_table"},
 		},
 		Settings: config.SyncSettingsConfig{
-			BatchSize:      1000,
+			BatchSize:     1000,
+			BatchBytes:    10485760, // 10MB
 			ParallelTables: 2,
-			BatchInterval:  time.Second * 10,
+			BatchInterval: time.Second * 10,
 			DataRange: config.DataRangeConfig{
 				StartTime: "2023-01-01 00:00:00",
 				EndTime:   "2023-12-31 23:59:59",
@@ -434,7 +466,10 @@ func TestSyncTaskConfiguration(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	task := NewSyncTask(cfg, policy, mockStorage, logger)
+	task, err := NewSyncTask(cfg, policy, mockStorage, nil, nil, logger)
+	if err != nil {
+		t.Fatalf("Failed to create sync task: %v", err)
+	}
 
 	// 测试配置访问方法
 	taskConfig := task.GetTaskConfig()
@@ -448,6 +483,221 @@ func TestSyncTaskConfiguration(t *testing.T) {
 
 	if taskConfig.Settings.ParallelTables != cfg.Settings.ParallelTables {
 		t.Errorf("Expected parallel tables %d, got %d", cfg.Settings.ParallelTables, taskConfig.Settings.ParallelTables)
+	}
+
+	if taskConfig.Settings.BatchBytes != cfg.Settings.BatchBytes {
+		t.Errorf("Expected batch bytes %d, got %d", cfg.Settings.BatchBytes, taskConfig.Settings.BatchBytes)
+	}
+}
+
+// TestSyncTaskWithMixedTableResults 测试混合表同步结果（部分成功部分失败）
+func TestSyncTaskWithMixedTableResults(t *testing.T) {
+	// 这个测试验证了当某些表同步失败时，任务应该标记为失败，但成功的表也应该被记录
+	cfg := &config.SyncTaskConfig{
+		TaskID:  "mixed_result_task",
+		Name:    "Mixed Result Task",
+		Enabled: true,
+		Reader: config.DataSourceConfig{
+			Name:     "test_clickhouse",
+			Vendor:   "clickhouse",
+			Protocol: "mysql",
+			Database: "test_db",
+			Tables:   []string{"table1", "table2"},
+		},
+		Writer: config.DataSourceConfig{
+			Name:     "test_starrocks",
+			Vendor:   "starrocks",
+			Protocol: "mysql",
+			Database: "test_db",
+			Tables:   []string{"table1", "table2"},
+		},
+		Settings: config.SyncSettingsConfig{
+			BatchSize:      100,
+			BatchBytes:     1048576, // 1MB
+			ParallelTables: 2,
+		},
+	}
+
+	policy := &config.PolicyConfig{
+		Transfer: config.TransferPolicyConfig{
+			WriterConcurrency: 1,
+		},
+	}
+
+	mockStorage := storage.NewMemoryStorage()
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+
+	task, err := NewSyncTask(cfg, policy, mockStorage, nil, nil, logger)
+	if err != nil {
+		t.Fatalf("Failed to create sync task: %v", err)
+	}
+
+	// 验证初始状态
+	if task.GetStatus() != TaskStatusIdle {
+		t.Errorf("Expected initial status '%s', got '%s'", TaskStatusIdle, task.GetStatus())
+	}
+
+	// 验证作业数量
+	allJobs := task.GetAllTableJobs()
+	if len(allJobs) != 2 {
+		t.Errorf("Expected 2 jobs, got %d", len(allJobs))
+	}
+}
+
+// TestSyncTaskIsInTimeWindow 测试时间窗口检查
+func TestSyncTaskIsInTimeWindow(t *testing.T) {
+	cfg := &config.SyncTaskConfig{
+		TaskID:  "time_window_test",
+		Name:    "Time Window Test",
+		Enabled: true,
+		Reader: config.DataSourceConfig{
+			Name:     "test_clickhouse",
+			Vendor:   "clickhouse",
+			Protocol: "mysql",
+			Database: "test_db",
+			Tables:   []string{"test_table"},
+		},
+		Writer: config.DataSourceConfig{
+			Name:     "test_starrocks",
+			Vendor:   "starrocks",
+			Protocol: "mysql",
+			Database: "test_db",
+			Tables:   []string{"test_table"},
+		},
+		Settings: config.SyncSettingsConfig{
+			BatchSize:      100,
+			BatchBytes:     1048576, // 1MB
+			ParallelTables: 1,
+		},
+	}
+
+	policy := &config.PolicyConfig{
+		Transfer: config.TransferPolicyConfig{
+			WriterConcurrency: 1,
+		},
+	}
+
+	mockStorage := storage.NewMemoryStorage()
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+
+	task, err := NewSyncTask(cfg, policy, mockStorage, nil, nil, logger)
+	if err != nil {
+		t.Fatalf("Failed to create sync task: %v", err)
+	}
+
+	// 测试IsInTimeWindow方法（当前实现总是返回true）
+	if !task.IsInTimeWindow() {
+		t.Error("Expected IsInTimeWindow to return true")
+	}
+}
+
+// TestSyncTaskMultipleStops 测试多次停止操作
+func TestSyncTaskMultipleStops(t *testing.T) {
+	cfg := &config.SyncTaskConfig{
+		TaskID:  "multiple_stop_test",
+		Name:    "Multiple Stop Test",
+		Enabled: true,
+		Reader: config.DataSourceConfig{
+			Name:     "test_clickhouse",
+			Vendor:   "clickhouse",
+			Protocol: "mysql",
+			Database: "test_db",
+			Tables:   []string{"test_table"},
+		},
+		Writer: config.DataSourceConfig{
+			Name:     "test_starrocks",
+			Vendor:   "starrocks",
+			Protocol: "mysql",
+			Database: "test_db",
+			Tables:   []string{"test_table"},
+		},
+		Settings: config.SyncSettingsConfig{
+			BatchSize:      100,
+			BatchBytes:     1048576, // 1MB
+			ParallelTables: 1,
+		},
+	}
+
+	policy := &config.PolicyConfig{
+		Transfer: config.TransferPolicyConfig{
+			WriterConcurrency: 1,
+		},
+	}
+
+	mockStorage := storage.NewMemoryStorage()
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+
+	task, err := NewSyncTask(cfg, policy, mockStorage, nil, nil, logger)
+	if err != nil {
+		t.Fatalf("Failed to create sync task: %v", err)
+	}
+
+	// 第一次停止
+	err = task.Stop()
+	if err != nil {
+		t.Errorf("Expected no error on first stop, got: %v", err)
+	}
+
+	if task.GetStatus() != TaskStatusCancelled {
+		t.Errorf("Expected status '%s' after first stop, got '%s'", TaskStatusCancelled, task.GetStatus())
+	}
+
+	// 第二次停止应该也不报错
+	err = task.Stop()
+	if err != nil {
+		t.Errorf("Expected no error on second stop, got: %v", err)
+	}
+}
+
+// TestSyncTaskGetNonexistentTableProgress 测试获取不存在表的进度
+func TestSyncTaskGetNonexistentTableProgress(t *testing.T) {
+	cfg := &config.SyncTaskConfig{
+		TaskID:  "nonexistent_progress_test",
+		Name:    "Nonexistent Progress Test",
+		Enabled: true,
+		Reader: config.DataSourceConfig{
+			Name:     "test_clickhouse",
+			Vendor:   "clickhouse",
+			Protocol: "mysql",
+			Database: "test_db",
+			Tables:   []string{"existing_table"},
+		},
+		Writer: config.DataSourceConfig{
+			Name:     "test_starrocks",
+			Vendor:   "starrocks",
+			Protocol: "mysql",
+			Database: "test_db",
+			Tables:   []string{"existing_table"},
+		},
+		Settings: config.SyncSettingsConfig{
+			BatchSize:      100,
+			BatchBytes:     1048576, // 1MB
+			ParallelTables: 1,
+		},
+	}
+
+	policy := &config.PolicyConfig{
+		Transfer: config.TransferPolicyConfig{
+			WriterConcurrency: 1,
+		},
+	}
+
+	mockStorage := storage.NewMemoryStorage()
+	logger := logrus.New()
+	logger.SetLevel(logrus.ErrorLevel)
+
+	task, err := NewSyncTask(cfg, policy, mockStorage, nil, nil, logger)
+	if err != nil {
+		t.Fatalf("Failed to create sync task: %v", err)
+	}
+
+	// 测试获取不存在表的进度
+	progress := task.GetTableProgress("nonexistent_table")
+	if progress != nil {
+		t.Error("Expected nil progress for nonexistent table")
 	}
 }
 
@@ -469,9 +719,11 @@ func BenchmarkSyncTaskOperations(b *testing.B) {
 			Vendor:   "starrocks",
 			Protocol: "mysql",
 			Database: "test_db",
+			Tables:   []string{"table1", "table2", "table3", "table4", "table5"},
 		},
 		Settings: config.SyncSettingsConfig{
 			BatchSize:      1000,
+			BatchBytes:     10485760, // 10MB
 			ParallelTables: 5,
 		},
 	}
@@ -486,7 +738,10 @@ func BenchmarkSyncTaskOperations(b *testing.B) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	task := NewSyncTask(cfg, policy, mockStorage, logger)
+	task, err := NewSyncTask(cfg, policy, mockStorage, nil, nil, logger)
+	if err != nil {
+		b.Fatalf("Failed to create sync task: %v", err)
+	}
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

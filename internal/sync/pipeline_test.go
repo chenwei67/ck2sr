@@ -41,7 +41,7 @@ func TestPipelineInitialization(t *testing.T) {
 	logger.SetLevel(logrus.ErrorLevel) // 减少测试输出
 
 	// 创建Pipeline
-	pipeline := NewPipeline(cfg, policy, logger)
+	pipeline := NewPipeline(cfg, policy, nil, nil, "test_table", "test_table", logger)
 	if pipeline == nil {
 		t.Fatal("Failed to create pipeline")
 	}
@@ -85,7 +85,7 @@ func TestPipelineSetStorage(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	pipeline := NewPipeline(cfg, policy, logger)
+	pipeline := NewPipeline(cfg, policy, nil, nil, "test_table", "test_table", logger)
 	mockStorage := storage.NewMemoryStorage()
 
 	// 设置存储
@@ -121,7 +121,7 @@ func TestPipelineMonitorIntegration(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	pipeline := NewPipeline(cfg, policy, logger)
+	pipeline := NewPipeline(cfg, policy, nil, nil, "test_table", "test_table", logger)
 
 	// 检查Monitor是否正确初始化
 	if pipeline.monitor == nil {
@@ -157,7 +157,7 @@ func TestPipelineChannelInitialization(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	pipeline := NewPipeline(cfg, policy, logger)
+	pipeline := NewPipeline(cfg, policy, nil, nil, "test_table", "test_table", logger)
 
 	// 检查channels是否正确初始化
 	if pipeline.dataChan == nil {
@@ -205,7 +205,7 @@ func TestPipelineStatsUpdate(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	pipeline := NewPipeline(cfg, policy, logger)
+	pipeline := NewPipeline(cfg, policy, nil, nil, "test_table", "test_table", logger)
 
 	// 获取初始统计
 	initialStats := pipeline.getStats()
@@ -254,7 +254,7 @@ func TestPipelineEndTime(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	pipeline := NewPipeline(cfg, policy, logger)
+	pipeline := NewPipeline(cfg, policy, nil, nil, "test_table", "test_table", logger)
 
 	// 检查初始结束时间
 	initialStats := pipeline.getStats()
@@ -346,7 +346,7 @@ func TestPipelineConcurrencySafety(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	pipeline := NewPipeline(cfg, policy, logger)
+	pipeline := NewPipeline(cfg, policy, nil, nil, "test_table", "test_table", logger)
 
 	// 并发读取统计信息
 	numGoroutines := 10
@@ -406,7 +406,7 @@ func BenchmarkPipelineStats(b *testing.B) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	pipeline := NewPipeline(cfg, policy, logger)
+	pipeline := NewPipeline(cfg, policy, nil, nil, "test_table", "test_table", logger)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {

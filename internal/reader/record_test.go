@@ -28,18 +28,21 @@ func TestMarshalJSON_NilValues(t *testing.T) {
 	}
 }
 
-// TestMarshalJSON_RawValueWithSpecialChars 测试RawValue特殊字符转义
-func TestMarshalJSON_RawValueWithSpecialChars(t *testing.T) {
+// TestMarshalJSON_RawValueArray 测试RawValue ClickHouse数组转JSON
+// 用户策略：所有RawValue都视为JSON，单引号转双引号
+func TestMarshalJSON_RawValueArray(t *testing.T) {
 	columns := NewColumnMetadata(
 		[]string{"col1", "col2"},
-		[]string{"String", "String"},
+		[]string{"String", "Array"},
 	)
 
 	record := NewRecord(columns)
 	record.Values[0] = "normal"
+	// ClickHouse数组格式：['item1','item2']
+	// 策略：IsJSON=true，序列化时转换单引号为双引号
 	record.Values[1] = RawValue{
-		IsJSON: false,
-		Data:   []byte(`value|with"special\chars`), // 包含 |, ", \
+		IsJSON: true,
+		Data:   []byte(`['item1','item2']`),
 	}
 
 	data, err := json.Marshal(record)
@@ -53,13 +56,17 @@ func TestMarshalJSON_RawValueWithSpecialChars(t *testing.T) {
 		t.Fatalf("Generated invalid JSON: %v\nJSON: %s", err, string(data))
 	}
 
-	// 验证值正确转义
-	if result["col2"] != `value|with"special\chars` {
-		t.Errorf("Special characters not properly escaped: %v", result["col2"])
+	// 验证数组被正确转换
+	arr, ok := result["col2"].([]interface{})
+	if !ok {
+		t.Fatalf("col2 should be array, got: %T %v", result["col2"], result["col2"])
+	}
+	if len(arr) != 2 || arr[0] != "item1" || arr[1] != "item2" {
+		t.Errorf("Array values incorrect: %v", arr)
 	}
 }
 
-// TestMarshalJSON_RawValueJSON 测试RawValue JSON直传
+// TestMarshalJSON_RawValueJSON 测试RawValue JSON对象直传
 func TestMarshalJSON_RawValueJSON(t *testing.T) {
 	columns := NewColumnMetadata(
 		[]string{"col1", "col2"},
@@ -81,7 +88,7 @@ func TestMarshalJSON_RawValueJSON(t *testing.T) {
 	// 验证JSON结构
 	var result map[string]interface{}
 	if err := json.Unmarshal(data, &result); err != nil {
-		t.Fatalf("Generated invalid JSON: %v", err)
+		t.Fatalf("Generated invalid JSON: %v\nJSON: %s", err, string(data))
 	}
 
 	// 验证嵌套JSON被正确处理
@@ -94,17 +101,18 @@ func TestMarshalJSON_RawValueJSON(t *testing.T) {
 	}
 }
 
-// TestMarshalJSON_ControlCharacters 测试控制字符转义
-func TestMarshalJSON_ControlCharacters(t *testing.T) {
+// TestMarshalJSON_ClickHouseArrayWithSpecialChars 测试包含特殊字符的ClickHouse数组
+func TestMarshalJSON_ClickHouseArrayWithSpecialChars(t *testing.T) {
 	columns := NewColumnMetadata(
 		[]string{"col1"},
-		[]string{"String"},
+		[]string{"Array"},
 	)
 
 	record := NewRecord(columns)
+	// ClickHouse数组包含特殊字符（反斜杠、双引号等）
 	record.Values[0] = RawValue{
-		IsJSON: false,
-		Data:   []byte("line1\nline2\ttab\rcarriage"),
+		IsJSON: true,
+		Data:   []byte(`['item\\1','item\"2']`), // 已经是转义后的格式
 	}
 
 	data, err := json.Marshal(record)
@@ -118,10 +126,13 @@ func TestMarshalJSON_ControlCharacters(t *testing.T) {
 		t.Fatalf("Generated invalid JSON: %v\nJSON: %s", err, string(data))
 	}
 
-	// 验证控制字符被正确转义
-	expected := "line1\nline2\ttab\rcarriage"
-	if result["col1"] != expected {
-		t.Errorf("Control characters not properly handled: got %q, want %q", result["col1"], expected)
+	// 验证数组内容
+	arr, ok := result["col1"].([]interface{})
+	if !ok {
+		t.Fatalf("col1 should be array, got: %T", result["col1"])
+	}
+	if len(arr) != 2 {
+		t.Errorf("Expected 2 items, got %d", len(arr))
 	}
 }
 
@@ -138,7 +149,7 @@ func TestMarshalJSON_MixedTypes(t *testing.T) {
 	record.Values[2] = true
 	record.Values[3] = nil // NULL
 	record.Values[4] = RawValue{IsJSON: true, Data: []byte(`{"key":"val"}`)}
-	record.Values[5] = RawValue{IsJSON: false, Data: []byte(`[1,2,3]`)}
+	record.Values[5] = RawValue{IsJSON: true, Data: []byte(`[1,2,3]`)}
 
 	data, err := json.Marshal(record)
 	if err != nil {
@@ -164,7 +175,88 @@ func TestMarshalJSON_MixedTypes(t *testing.T) {
 	if _, exists := result["nil_col"]; exists {
 		t.Errorf("Nil column should not be present in JSON")
 	}
-	if result["array"] != "[1,2,3]" {
-		t.Errorf("Array value incorrect: %v", result["array"])
+
+	// 验证JSON数组
+	arr, ok := result["array"].([]interface{})
+	if !ok {
+		t.Fatalf("array should be []interface{}, got: %T", result["array"])
+	}
+	if len(arr) != 3 {
+		t.Errorf("Array length incorrect: %d", len(arr))
 	}
 }
+
+// TestMarshalJSON_EmptyArray 测试空数组
+func TestMarshalJSON_EmptyArray(t *testing.T) {
+	columns := NewColumnMetadata(
+		[]string{"col1", "col2"},
+		[]string{"String", "Array"},
+	)
+
+	record := NewRecord(columns)
+	record.Values[0] = "test"
+	record.Values[1] = RawValue{
+		IsJSON: true,
+		Data:   []byte(`[]`),
+	}
+
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("MarshalJSON failed: %v", err)
+	}
+
+	// 验证JSON有效
+	var result map[string]interface{}
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("Generated invalid JSON: %v\nJSON: %s", err, string(data))
+	}
+
+	// 验证空数组
+	arr, ok := result["col2"].([]interface{})
+	if !ok {
+		t.Fatalf("col2 should be array, got: %T", result["col2"])
+	}
+	if len(arr) != 0 {
+		t.Errorf("Expected empty array, got length %d", len(arr))
+	}
+}
+
+// TestMarshalJSON_NestedJSON 测试嵌套JSON结构
+func TestMarshalJSON_NestedJSON(t *testing.T) {
+	columns := NewColumnMetadata(
+		[]string{"col1"},
+		[]string{"JSON"},
+	)
+
+	record := NewRecord(columns)
+	record.Values[0] = RawValue{
+		IsJSON: true,
+		Data:   []byte(`{"users":[{"name":"Alice","age":30},{"name":"Bob","age":25}]}`),
+	}
+
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("MarshalJSON failed: %v", err)
+	}
+
+	// 验证JSON有效
+	var result map[string]interface{}
+	if err := json.Unmarshal(data, &result); err != nil {
+		t.Fatalf("Generated invalid JSON: %v\nJSON: %s", err, string(data))
+	}
+
+	// 验证嵌套结构
+	obj, ok := result["col1"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("col1 should be object, got: %T", result["col1"])
+	}
+
+	users, ok := obj["users"].([]interface{})
+	if !ok {
+		t.Fatalf("users should be array, got: %T", obj["users"])
+	}
+	if len(users) != 2 {
+		t.Errorf("Expected 2 users, got %d", len(users))
+	}
+}
+

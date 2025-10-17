@@ -24,10 +24,10 @@ policy:
     retry_interval: 60s
     max_concurrent_task: 5
   retry:
-    max_retries: 3
-    initial_delay: 1s
-    max_delay: 30s
-    backoff_factor: 2.0
+    max_attempts: 3
+    initial_backoff: 1s
+    max_backoff: 30s
+    backoff_multiplier: 2.0
 
 monitor:
   enabled: true
@@ -133,8 +133,8 @@ sync_tasks:
 	if cfg.Policy.Schedule.MaxConcurrentTask != 5 {
 		t.Errorf("Expected max concurrent tasks 5, got %d", cfg.Policy.Schedule.MaxConcurrentTask)
 	}
-	if cfg.Policy.Retry.MaxRetries != 3 {
-		t.Errorf("Expected max retries 3, got %d", cfg.Policy.Retry.MaxRetries)
+	if cfg.Policy.Retry.MaxAttempts != 3 {
+		t.Errorf("Expected max attempts 3, got %d", cfg.Policy.Retry.MaxAttempts)
 	}
 
 	// 验证ClickHouse配置

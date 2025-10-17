@@ -5,7 +5,16 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
+
+// getTestLogger 创建测试用的logger
+func getTestLogger() *logrus.Logger {
+	logger := logrus.New()
+	logger.SetLevel(logrus.WarnLevel) // 测试时只显示警告和错误
+	return logger
+}
 
 // TestMemoryStorage 测试内存存储实现
 func TestMemoryStorage(t *testing.T) {
@@ -93,7 +102,7 @@ func TestFileStorage(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	storage, err := NewFileStorage(tempDir)
+	storage, err := NewFileStorage(tempDir, getTestLogger())
 	if err != nil {
 		t.Fatalf("Failed to create file storage: %v", err)
 	}
@@ -200,7 +209,7 @@ func TestFileStoragePersistence(t *testing.T) {
 	offset := int64(98765)
 
 	// 创建第一个存储实例并保存数据
-	storage1, err := NewFileStorage(tempDir)
+	storage1, err := NewFileStorage(tempDir, getTestLogger())
 	if err != nil {
 		t.Fatalf("Failed to create first storage: %v", err)
 	}
@@ -229,7 +238,7 @@ func TestFileStoragePersistence(t *testing.T) {
 	storage1.Close()
 
 	// 创建第二个存储实例并验证数据是否持久化
-	storage2, err := NewFileStorage(tempDir)
+	storage2, err := NewFileStorage(tempDir, getTestLogger())
 	if err != nil {
 		t.Fatalf("Failed to create second storage: %v", err)
 	}
@@ -315,7 +324,7 @@ func TestInvalidStoragePath(t *testing.T) {
 	// 在Windows上尝试使用包含无效字符的路径
 	invalidPath := "invalid/path\x00/with/null/byte"
 
-	_, err := NewFileStorage(invalidPath)
+	_, err := NewFileStorage(invalidPath, getTestLogger())
 	if err == nil {
 		t.Error("Expected error when creating storage with invalid path")
 	}
@@ -329,7 +338,7 @@ func TestStorageErrorHandling(t *testing.T) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	storage, err := NewFileStorage(tempDir)
+	storage, err := NewFileStorage(tempDir, getTestLogger())
 	if err != nil {
 		t.Fatalf("Failed to create storage: %v", err)
 	}
@@ -395,7 +404,7 @@ func BenchmarkFileStorage(b *testing.B) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	storage, err := NewFileStorage(tempDir)
+	storage, err := NewFileStorage(tempDir, getTestLogger())
 	if err != nil {
 		b.Fatalf("Failed to create storage: %v", err)
 	}

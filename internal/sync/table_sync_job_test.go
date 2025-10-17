@@ -43,7 +43,7 @@ func TestTableSyncJobCreation(t *testing.T) {
 	logger.SetLevel(logrus.ErrorLevel) // 减少测试输出
 
 	// 创建 TableSyncJob 实例
-	job := NewTableSyncJob("test_task", "test_table", taskConfig, policy, mockStorage, logger)
+	job := NewTableSyncJob("test_task", "test_table", "test_table", taskConfig, policy, nil, nil, mockStorage, logger)
 
 	// 测试基本属性
 	if job.GetTableName() != "test_table" {
@@ -60,18 +60,6 @@ func TestTableSyncJobCreation(t *testing.T) {
 	}
 	if progress.Status != "pending" {
 		t.Errorf("Expected initial status 'pending', got '%s'", progress.Status)
-	}
-
-	// 测试初始统计
-	stats := job.GetStats()
-	if stats == nil {
-		t.Fatal("Expected stats to be initialized")
-	}
-	if stats.TableName != "test_table" {
-		t.Errorf("Expected stats table name 'test_table', got '%s'", stats.TableName)
-	}
-	if stats.ProcessedRows != 0 {
-		t.Errorf("Expected initial processed rows 0, got %d", stats.ProcessedRows)
 	}
 }
 
@@ -107,7 +95,7 @@ func TestTableSyncJobProgress(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	job := NewTableSyncJob("progress_task", "progress_table", taskConfig, policy, mockStorage, logger)
+	job := NewTableSyncJob("progress_task", "progress_table", "progress_table", taskConfig, policy, nil, nil, mockStorage, logger)
 
 	// 检查初始进度
 	initialProgress := job.GetProgress()
@@ -160,20 +148,20 @@ func TestTableSyncJobStats(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	job := NewTableSyncJob("stats_task", "stats_table", taskConfig, policy, mockStorage, logger)
+	job := NewTableSyncJob("stats_task", "stats_table", "stats_table", taskConfig, policy, nil, nil, mockStorage, logger)
 
-	// 检查初始统计
-	initialStats := job.GetStats()
-	if initialStats.TableName != "stats_table" {
-		t.Errorf("Expected table name 'stats_table', got '%s'", initialStats.TableName)
+	// 检查进度结构（替代统计信息检查）
+	progress := job.GetProgress()
+	if progress.TableName != "stats_table" {
+		t.Errorf("Expected table name 'stats_table', got '%s'", progress.TableName)
 	}
-	if initialStats.ProcessedRows != 0 {
+	if progress.ProcessedRows != 0 {
 		t.Error("Expected initial processed rows to be 0")
 	}
-	if !initialStats.StartTime.IsZero() {
+	if !progress.StartTime.IsZero() {
 		t.Error("Expected initial start time to be zero")
 	}
-	if !initialStats.EndTime.IsZero() {
+	if !progress.EndTime.IsZero() {
 		t.Error("Expected initial end time to be zero")
 	}
 }
@@ -210,7 +198,7 @@ func TestTableSyncJobStop(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	job := NewTableSyncJob("stop_task", "stop_table", taskConfig, policy, mockStorage, logger)
+	job := NewTableSyncJob("stop_task", "stop_table", "stop_table", taskConfig, policy, nil, nil, mockStorage, logger)
 
 	// 测试停止未启动的作业
 	err := job.Stop()
@@ -257,7 +245,7 @@ func TestTableSyncJobConcurrency(t *testing.T) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	job := NewTableSyncJob("concurrent_task", "concurrent_table", taskConfig, policy, mockStorage, logger)
+	job := NewTableSyncJob("concurrent_task", "concurrent_table", "concurrent_table", taskConfig, policy, nil, nil, mockStorage, logger)
 
 	// 并发读取进度和统计
 	numGoroutines := 10
@@ -275,16 +263,9 @@ func TestTableSyncJobConcurrency(t *testing.T) {
 					return
 				}
 
-				// 并发读取统计
-				stats := job.GetStats()
-				if stats == nil {
-					t.Errorf("Got nil stats in goroutine %d", id)
-					return
-				}
-
 				// 检查数据一致性
-				if progress.TableName != stats.TableName {
-					t.Errorf("Table name mismatch between progress and stats in goroutine %d", id)
+				if progress.TableName != "concurrent_table" {
+					t.Errorf("Table name mismatch in goroutine %d", id)
 					return
 				}
 			}
@@ -346,7 +327,7 @@ func TestTableSyncJobProgressPersistence(t *testing.T) {
 	}
 
 	// 创建新的作业实例，应该加载已保存的进度
-	job := NewTableSyncJob("persistence_task", "persistence_table", taskConfig, policy, mockStorage, logger)
+	job := NewTableSyncJob("persistence_task", "persistence_table", "persistence_table", taskConfig, policy, nil, nil, mockStorage, logger)
 
 	// 检查是否正确加载了进度（注意：实际的加载逻辑在 Start 方法中）
 	progress := job.GetProgress()
@@ -395,7 +376,7 @@ func TestTableSyncJobMultipleTables(t *testing.T) {
 	jobs := make([]TableSyncJob, len(tables))
 
 	for i, tableName := range tables {
-		jobs[i] = NewTableSyncJob("multi_table_task", tableName, taskConfig, policy, mockStorage, logger)
+		jobs[i] = NewTableSyncJob("multi_table_task", tableName, tableName, taskConfig, policy, nil, nil, mockStorage, logger)
 	}
 
 	// 验证每个作业的独立性
@@ -408,11 +389,6 @@ func TestTableSyncJobMultipleTables(t *testing.T) {
 		progress := job.GetProgress()
 		if progress.TableName != expectedTable {
 			t.Errorf("Job %d: expected progress table name '%s', got '%s'", i, expectedTable, progress.TableName)
-		}
-
-		stats := job.GetStats()
-		if stats.TableName != expectedTable {
-			t.Errorf("Job %d: expected stats table name '%s', got '%s'", i, expectedTable, stats.TableName)
 		}
 	}
 }
@@ -451,7 +427,7 @@ func BenchmarkTableSyncJobCreation(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		job := NewTableSyncJob("benchmark_task", "benchmark_table", taskConfig, policy, mockStorage, logger)
+		job := NewTableSyncJob("benchmark_task", "benchmark_table", "benchmark_table", taskConfig, policy, nil, nil, mockStorage, logger)
 		if job == nil {
 			b.Fatal("Failed to create job")
 		}
@@ -490,18 +466,13 @@ func BenchmarkTableSyncJobOperations(b *testing.B) {
 	logger := logrus.New()
 	logger.SetLevel(logrus.ErrorLevel)
 
-	job := NewTableSyncJob("ops_benchmark_task", "ops_benchmark_table", taskConfig, policy, mockStorage, logger)
+	job := NewTableSyncJob("ops_benchmark_task", "ops_benchmark_table", "ops_benchmark_table", taskConfig, policy, nil, nil, mockStorage, logger)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		progress := job.GetProgress()
 		if progress == nil {
 			b.Fatal("Got nil progress")
-		}
-
-		stats := job.GetStats()
-		if stats == nil {
-			b.Fatal("Got nil stats")
 		}
 	}
 }
