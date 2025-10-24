@@ -1,4 +1,9 @@
 {
+  "env": {
+    "ANTHROPIC_AUTH_TOKEN": "sk-ant-oat01-NTy7BPgXDn3h8yFUsk2CUkjhfcI5eeQeHnsJ3Vi2K7GETmHGu2_d8W1iJzT1Kpitj84FDm_99USE6_UAJymX2vWxFUasEAA",
+    "ANTHROPIC_BASE_URL": "https://code.newcli.com/claude",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
+  },
   "permissions": {
     "allow": [
       "Bash(go run:*)",
@@ -31,7 +36,8 @@
       "Bash(git rm:*)",
       "Bash(git log:*)",
       "Read(//d/**)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "Bash(go tool cover:*)"
     ],
     "deny": [],
     "ask": []

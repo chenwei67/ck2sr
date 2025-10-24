@@ -120,7 +120,6 @@ data/
 test-results/
 
 # Build outputs
-ck2sr
 ck2sr_unix
 ck2sr.exe
 main
