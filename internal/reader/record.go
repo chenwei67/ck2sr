@@ -5,6 +5,10 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 // RawValue 表示未解析的原始值（用于延迟解析 JSON）
@@ -22,9 +26,6 @@ type Record struct {
 	// Values 按列顺序存储的值
 	// 使用 interface{} 以支持多种类型，但避免嵌套 map
 	Values []interface{}
-
-	// columnIndex 列名到索引的映射（共享，延迟初始化）
-	columnIndex map[string]int
 }
 
 // ColumnMetadata 列元数据（所有记录共享）
@@ -160,7 +161,7 @@ func (r *Record) MarshalJSON() ([]byte, error) {
 
 		// 写入列名（安全转义）
 		buf = append(buf, '"')
-		buf = appendEscapedString(buf, name)
+		buf = append(buf, name...)
 		buf = append(buf, '"', ':')
 
 		// 🔧 修复2：处理 RawValue
@@ -198,87 +199,44 @@ func (r *Record) MarshalJSON() ([]byte, error) {
 	return buf, nil
 }
 
-// appendEscapedString 追加转义后的字符串（用于列名）
-func appendEscapedString(buf []byte, s string) []byte {
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch c {
-		case '"', '\\':
-			buf = append(buf, '\\', c)
-		case '\n':
-			buf = append(buf, '\\', 'n')
-		case '\r':
-			buf = append(buf, '\\', 'r')
-		case '\t':
-			buf = append(buf, '\\', 't')
-		default:
-			if c < 0x20 {
-				// 控制字符转义为 \uXXXX
-				buf = append(buf, '\\', 'u', '0', '0')
-				buf = append(buf, hexDigit(c>>4), hexDigit(c&0xF))
-			} else {
-				buf = append(buf, c)
-			}
-		}
-	}
-	return buf
-}
-
-// appendEscapedBytes 追加转义后的字节数组（用于RawValue的非JSON数据）
-func appendEscapedBytes(buf []byte, data []byte) []byte {
-	for _, c := range data {
-		switch c {
-		case '"', '\\':
-			buf = append(buf, '\\', c)
-		case '\n':
-			buf = append(buf, '\\', 'n')
-		case '\r':
-			buf = append(buf, '\\', 'r')
-		case '\t':
-			buf = append(buf, '\\', 't')
-		default:
-			if c < 0x20 {
-				// 控制字符转义为 \uXXXX
-				buf = append(buf, '\\', 'u', '0', '0')
-				buf = append(buf, hexDigit(c>>4), hexDigit(c&0xF))
-			} else {
-				buf = append(buf, c)
-			}
-		}
-	}
-	return buf
-}
-
-// hexDigit 返回十六进制数字字符
-func hexDigit(n byte) byte {
-	if n < 10 {
-		return '0' + n
-	}
-	return 'a' + (n - 10)
-}
-
 // RecordPool 记录对象池
 type RecordPool struct {
-	pool    sync.Pool
-	columns *ColumnMetadata
+	pool       sync.Pool
+	columns    *ColumnMetadata
+	freeCount  atomic.Int64 // 可选：跟踪空闲对象数量（调试用）
+	totalCount atomic.Int64 // 可选：跟踪总对象数量（调试用）
 }
 
 // NewRecordPool 创建新的记录对象池
 func NewRecordPool(columns *ColumnMetadata) *RecordPool {
-	return &RecordPool{
+	rp := &RecordPool{
 		columns: columns,
-		pool: sync.Pool{
-			New: func() interface{} {
-				return NewRecord(columns)
-			},
-		},
+		pool:    sync.Pool{},
 	}
+	rp.pool.New = func() interface{} {
+		rp.totalCount.Add(1)
+		rp.freeCount.Add(1)
+		return NewRecord(columns)
+	}
+
+	return rp
+}
+
+// 定时打印池状态（调试用）
+func (rp *RecordPool) StartDebugLogging(interval time.Duration, logger *logrus.Logger) {
+	ticker := time.NewTicker(interval)
+	go func() {
+		for range ticker.C {
+			logger.Infof("RecordPool stats - Total: %d, Free: %d", rp.totalCount.Load(), rp.freeCount.Load())
+		}
+	}()
 }
 
 // Get 从对象池获取记录
 func (rp *RecordPool) Get() *Record {
 	record := rp.pool.Get().(*Record)
-	record.Reset() // 确保记录已重置
+	rp.freeCount.Add(-1)
+	// record.Reset() // TODO：测试验证是否需要重置？
 	return record
 }
 
@@ -286,5 +244,6 @@ func (rp *RecordPool) Get() *Record {
 func (rp *RecordPool) Put(record *Record) {
 	if record != nil {
 		rp.pool.Put(record)
+		rp.freeCount.Add(1)
 	}
 }

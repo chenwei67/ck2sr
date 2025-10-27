@@ -75,6 +75,9 @@ func (r *ClickHouseHTTPReader) GetRecord() (interface{}, error) {
 	return nil, fmt.Errorf("HTTP reader requires custom JSON parsing")
 }
 
+func (r *ClickHouseHTTPReader) ReleaseRecords(records []interface{}) {
+}
+
 func (r *ClickHouseHTTPReader) Close() error {
 	return nil
 }
@@ -157,6 +160,15 @@ func (r *ClickHouseReader) Next() bool {
 		return false
 	}
 	return r.rows.Next()
+}
+
+// ReleaseRecords 释放已经被使用完的记录
+func (r *ClickHouseReader) ReleaseRecords(records []interface{}) {
+	for _, rec := range records {
+		if record, ok := rec.(*Record); ok {
+			r.recordPool.Put(record)
+		}
+	}
 }
 
 // GetRecord 获取当前记录
@@ -243,6 +255,7 @@ func (r *ClickHouseReader) initializeColumnMetadata() error {
 
 	// 创建记录对象池
 	r.recordPool = NewRecordPool(r.columnMetadata)
+	// r.recordPool.StartDebugLogging(time.Second*30, r.logger) // TODO: [DEBUG] 定时打印池状态（调试用）
 
 	// 初始化扫描目标缓冲区（根据列类型创建正确的目标变量）
 	r.scanDest = make([]interface{}, columnCount)

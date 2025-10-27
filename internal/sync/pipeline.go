@@ -59,6 +59,7 @@ type ProgressInfo struct {
 	Offset        int64
 	ProcessedRows uint64
 	BatchCount    int64
+	BatchRecord   []interface{}
 }
 
 // NewPipeline 创建新的异步Pipeline
@@ -81,10 +82,10 @@ func NewPipeline(cfg *config.SyncTaskConfig,
 		stats: &PipelineStats{
 			StartTime: time.Now(),
 		},
-		// 初始化channel，缓冲区大小为配置的并发数*2
-		dataChan:     make(chan DataBatch, policy.Transfer.WriterConcurrency*2),
+		// 初始化channel，缓冲区大小为配置的并发数
+		dataChan:     make(chan DataBatch, policy.Transfer.WriterConcurrency),
 		errorChan:    make(chan error, policy.Transfer.WriterConcurrency),
-		progressChan: make(chan ProgressInfo, 100),
+		progressChan: make(chan ProgressInfo, policy.Transfer.WriterConcurrency),
 	}
 }
 
@@ -402,13 +403,9 @@ func (p *Pipeline) writerWorker(ctx context.Context, workerID int) {
 				Offset:        batch.Offset,
 				ProcessedRows: uint64(len(batch.Data)),
 				BatchCount:    1,
+				BatchRecord:   batch.Data,
 			}
-
-			select {
-			case p.progressChan <- progress:
-			default:
-				// 进度通道已满，丢弃进度信息
-			}
+			p.progressChan <- progress
 
 			// 批处理间隔
 			if p.config.Settings.BatchInterval > 0 {

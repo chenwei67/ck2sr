@@ -76,6 +76,11 @@ func (r *RetryableReader) GetRecord() (interface{}, error) {
 	return record, getErr
 }
 
+// ReleaseRecords 释放已经被使用完的记录（透传）
+func (r *RetryableReader) ReleaseRecords(records []interface{}) {
+	r.underlying.ReleaseRecords(records)
+}
+
 // Close 关闭读取器（不重试，清理操作）
 func (r *RetryableReader) Close() error {
 	return r.underlying.Close()

@@ -84,6 +84,14 @@ func (r *StarRocksMySQLReader) Next() bool {
 	return r.rows.Next()
 }
 
+func (r *StarRocksMySQLReader) ReleaseRecords(records []interface{}) {
+	for _, rec := range records {
+		if record, ok := rec.(*Record); ok {
+			r.recordPool.Put(record)
+		}
+	}
+}
+
 // GetRecord 获取当前记录
 // P0 优化：使用强类型 Record + 对象池 + 延迟 JSON 解析
 func (r *StarRocksMySQLReader) GetRecord() (interface{}, error) {
@@ -434,6 +442,10 @@ func (r *StarRocksFlightSQLReader) GetRecord() (interface{}, error) {
 	record := r.records[r.index]
 	r.index++
 	return record, nil
+}
+
+func (r *StarRocksFlightSQLReader) ReleaseRecords(records []interface{}) {
+	// FlightSQL Reader不使用对象池，无需释放
 }
 
 func (r *StarRocksFlightSQLReader) Close() error {

@@ -15,6 +15,9 @@ type DataReader interface {
 	// 返回interface{}类型的记录数据，通常为map[string]interface{}
 	GetRecord() (interface{}, error)
 
+	// 释放已使用完的record内存，请在GetRecord()返回的数据处理完后调用
+	ReleaseRecords(records []interface{})
+
 	// Close 关闭读取器，释放资源
 	Close() error
 }
