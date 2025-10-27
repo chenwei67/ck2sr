@@ -24,11 +24,17 @@ func NewMySQLClient(config *MySQLConfig) (*MySQLClient, error) {
 			Username: config.Username,
 			Password: config.Password,
 		},
+		// Settings: clickhousego.Settings{
+		// 	"max_execution_time": 0,
+		// 	"max_rows_to_read":   0,
+		// 	"max_bytes_to_read":  0,
+		// },
 		DialTimeout:      config.Timeout,
 		MaxOpenConns:     10,
 		MaxIdleConns:     5,
-		ConnMaxLifetime:  time.Hour,
+		ConnMaxLifetime:  time.Hour * 24 * 365, // 永不超时
 		ConnOpenStrategy: clickhousego.ConnOpenInOrder,
+		ReadTimeout:      time.Hour * 24 * 365, // 永不超时
 	}
 
 	// 建立链接
