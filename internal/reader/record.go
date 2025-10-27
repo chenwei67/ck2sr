@@ -172,6 +172,20 @@ func (r *Record) MarshalJSON() ([]byte, error) {
 			continue
 		}
 
+		// 🔧 修复3：处理 []byte 类型（避免 base64 编码）
+		// 对于非 RawValue 的 []byte，将其转换为字符串
+		// 这修复了字符串被 base64 编码的问题
+		if bytesVal, ok := val.([]byte); ok {
+			// 将 []byte 转换为字符串并序列化
+			strVal := string(bytesVal)
+			strBytes, err := json.Marshal(strVal)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal []byte as string for column %s: %w", name, err)
+			}
+			buf = append(buf, strBytes...)
+			continue
+		}
+
 		// 其他类型使用标准 JSON 序列化
 		valBytes, err := json.Marshal(val)
 		if err != nil {

@@ -260,3 +260,39 @@ func TestMarshalJSON_NestedJSON(t *testing.T) {
 	}
 }
 
+// TestMarshalJSON_ByteArrayVsString 测试[]byte和string在Record中的编码差异
+func TestMarshalJSON_ByteArrayVsString(t *testing.T) {
+	tests := []struct {
+		name  string
+		value interface{}
+	}{
+		{
+			name:  "string_type",
+			value: "测试文本ABC",
+		},
+		{
+			name:  "byte_array_type",
+			value: []byte("测试文本ABC"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			columns := NewColumnMetadata(
+				[]string{"data"},
+				[]string{"String"},
+			)
+
+			record := NewRecord(columns)
+			record.Values[0] = tt.value
+
+			jsonBytes, err := json.Marshal(record)
+			if err != nil {
+				t.Fatalf("MarshalJSON failed: %v", err)
+			}
+
+			jsonStr := string(jsonBytes)
+			t.Logf("Value type: %T, JSON output: %s", tt.value, jsonStr)
+		})
+	}
+}

@@ -38,8 +38,8 @@ type SyncProgress struct {
 	SourceTable   string    `json:"source_table"`    // 源表名
 	TargetDB      string    `json:"target_db"`       // 目标数据库名
 	TargetTable   string    `json:"target_table"`    // 目标表名
-	TotalRows     int64     `json:"total_rows"`      // 本次需要同步的总行数
-	SyncedRows    int64     `json:"synced_rows"`     // 已同步完成的行数（断点偏移量）
+	TotalRows     uint64    `json:"total_rows"`      // 本次需要同步的总行数
+	SyncedRows    uint64    `json:"synced_rows"`     // 已同步完成的行数（断点偏移量）
 	SyncedBytes   int64     `json:"synced_bytes"`    // 已同步完成的字节数
 	StartSyncTime time.Time `json:"start_sync_time"` // 本次同步开始时间
 	EndSyncTime   time.Time `json:"end_sync_time"`   // 本次同步结束时间
@@ -52,8 +52,8 @@ type TableSyncProgress struct {
 	TaskID        string    `json:"task_id"`
 	TableName     string    `json:"table_name"`
 	Offset        int64     `json:"offset"`
-	ProcessedRows int64     `json:"processed_rows"`
-	TotalRows     int64     `json:"total_rows"`
+	ProcessedRows uint64    `json:"processed_rows"`
+	TotalRows     uint64    `json:"total_rows"`
 	Status        string    `json:"status"`
 	LastSyncTime  time.Time `json:"last_sync_time"`
 	StartTime     time.Time `json:"start_time"`

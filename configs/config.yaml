@@ -8,7 +8,7 @@ clickhouse:
   - name: myck-1              # 实例名称（用于任务引用）
     mysql:                     # MySQL协议接入配置（用于数据导出）
       host: "localhost"
-      port: 9004
+      port: 9000
       username: "default"
       password: ""
       timeout: "30s"

@@ -276,7 +276,7 @@ func (c *FlightSQLClient) GetTableSchema(ctx context.Context, database, table st
 	return columns, nil
 }
 
-func (c *FlightSQLClient) Count(ctx context.Context, query string) (int64, error) {
+func (c *FlightSQLClient) Count(ctx context.Context, query string) (uint64, error) {
 	records, err := c.QueryRecords(ctx, query)
 	if err != nil {
 		return 0, fmt.Errorf("failed to query count: %w", err)
@@ -293,7 +293,7 @@ func (c *FlightSQLClient) Count(ctx context.Context, query string) (int64, error
 	}
 
 	for _, v := range firstRecord {
-		if count, ok := v.(int64); ok {
+		if count, ok := v.(uint64); ok {
 			return count, nil
 		}
 	}

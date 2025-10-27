@@ -105,9 +105,9 @@ func (c *MySQLClient) GetTableSchema(ctx context.Context, database, table string
 	return columns, nil
 }
 
-func (c *MySQLClient) Count(ctx context.Context, query string) (int64, error) {
+func (c *MySQLClient) Count(ctx context.Context, query string) (uint64, error) {
 	row := c.db.QueryRowContext(ctx, query)
-	var count int64
+	var count uint64
 	if err := row.Scan(&count); err != nil {
 		return 0, fmt.Errorf("failed to scan count: %w", err)
 	}

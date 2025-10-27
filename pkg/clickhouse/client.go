@@ -1,10 +1,7 @@
 package clickhouse
 
 import (
-	"context"
 	"fmt"
-
-	"github.com/sunkaimr/ck2sr/pkg/protocol"
 )
 
 // Client ClickHouse 统一客户端
@@ -68,22 +65,6 @@ func (c *Client) HasMySQL() bool {
 // HasHTTP 是否有 HTTP 协议
 func (c *Client) HasHTTP() bool {
 	return c.http != nil
-}
-
-// GetTableSchema 获取表结构（使用 MySQL 协议）
-func (c *Client) GetTableSchema(ctx context.Context, database, table string) ([]protocol.ColumnInfo, error) {
-	if c.mysql == nil {
-		return nil, fmt.Errorf("MySQL protocol not configured")
-	}
-	return c.mysql.GetTableSchema(ctx, database, table)
-}
-
-// Count 统计行数（使用 MySQL 协议）
-func (c *Client) Count(ctx context.Context, query string) (int64, error) {
-	if c.mysql == nil {
-		return 0, fmt.Errorf("MySQL protocol not configured")
-	}
-	return c.mysql.Count(ctx, query)
 }
 
 // Close 关闭所有连接

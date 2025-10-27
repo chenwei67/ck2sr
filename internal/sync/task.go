@@ -185,7 +185,8 @@ func (t *SyncTask) GetAllTableProgress() map[string]*TableSyncProgress {
 
 // logSummaryStats 记录总体统计信息
 func (t *SyncTask) logSummaryStats(successCount, totalTables int) {
-	var totalRows, totalBytes int64
+	var totalRows uint64
+	var totalBytes int64
 	var totalDuration time.Duration
 	// 同步记录最晚结束时间和最早的开始时间来统计总耗时
 	var earliestStart, latestEnd time.Time

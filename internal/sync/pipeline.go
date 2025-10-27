@@ -57,7 +57,7 @@ type DataBatch struct {
 type ProgressInfo struct {
 	Table         string
 	Offset        int64
-	ProcessedRows int64
+	ProcessedRows uint64
 	BatchCount    int64
 }
 
@@ -99,7 +99,7 @@ func (p *Pipeline) SetProgressCallback(callback func(progress ProgressInfo)) {
 }
 
 // Initialize 初始化Pipeline组件
-func (p *Pipeline) Initialize(ctx context.Context, offset int64, limit int64) error {
+func (p *Pipeline) Initialize(ctx context.Context, offset uint64, limit uint64) error {
 	readerFactory := reader.NewReaderFactory()
 	writerFactory := writer.NewWriterFactory()
 
@@ -400,7 +400,7 @@ func (p *Pipeline) writerWorker(ctx context.Context, workerID int) {
 			progress := ProgressInfo{
 				Table:         batch.Table,
 				Offset:        batch.Offset,
-				ProcessedRows: int64(len(batch.Data)),
+				ProcessedRows: uint64(len(batch.Data)),
 				BatchCount:    1,
 			}
 

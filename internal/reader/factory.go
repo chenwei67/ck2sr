@@ -50,7 +50,8 @@ func (f *DefaultReaderFactory) createClickHouseReader(cfg *config.DataSourceConf
 		if err != nil {
 			return nil, fmt.Errorf("failed to get ClickHouse %s MySQL client: %w", cfg.Name, err)
 		}
-		return NewClickHouseMySQLReader(cfg, cli, logger)
+		return NewClickHouseReader(cfg, cli, logger)
+
 	case "http":
 		cli, err := ckCliMgr.GetHTTPClient(cfg.Name)
 		if err != nil {

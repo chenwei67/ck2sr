@@ -74,7 +74,7 @@ func (c *Client) GetTableSchema(ctx context.Context, database, table string) ([]
 	return nil, fmt.Errorf("no available client for schema query")
 }
 
-func (c *Client) Count(ctx context.Context, query string) (int64, error) {
+func (c *Client) Count(ctx context.Context, query string) (uint64, error) {
 	if c.mysql != nil {
 		return c.mysql.Count(ctx, query)
 	}

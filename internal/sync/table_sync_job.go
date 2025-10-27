@@ -32,10 +32,10 @@ type TableSyncJob interface {
 type TableSyncProgress struct {
 	TaskID           string        `json:"task_id"`           // 所属任务ID
 	TableName        string        `json:"table_name"`        // 表名
-	Offset           int64         `json:"offset"`            // 当前偏移量
-	TotalRows        int64         `json:"total_rows"`        // 要同步的总行数
+	Offset           uint64        `json:"offset"`            // 当前偏移量
+	TotalRows        uint64        `json:"total_rows"`        // 要同步的总行数
 	ProcessedBatches int64         `json:"processed_batches"` // 已处理批次数
-	ProcessedRows    int64         `json:"processed_rows"`    // 已处理行数
+	ProcessedRows    uint64        `json:"processed_rows"`    // 已处理行数
 	ProcessedBytes   int64         `json:"processed_bytes"`   // 已处理字节数
 	Progress         float64       `json:"progress"`          // 百分比（0.00-100.00）
 	LastSyncTime     time.Time     `json:"last_sync_time"`    // 最后更新时间
@@ -210,7 +210,7 @@ func (j *DefaultTableSyncJob) GetProgress() *TableSyncProgress {
 
 // queryTotalRows 查询本次需要同步的总行数
 // 根据任务配置的数据范围条件构建COUNT查询
-func (j *DefaultTableSyncJob) queryTotalRows() (int64, error) {
+func (j *DefaultTableSyncJob) queryTotalRows() (uint64, error) {
 	// 构建COUNT查询语句,与Pipeline中的查询条件保持一致
 	query := fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", j.config.Reader.Database, j.tableName)
 
@@ -334,7 +334,6 @@ func (j *DefaultTableSyncJob) onBatchProgress(progress ProgressInfo) {
 	// 获取Pipeline最新统计信息以更新字节数
 	pipelineStats := j.pipeline.GetStats()
 	j.progress.ProcessedBytes = pipelineStats.TotalBytes
-	j.progress.ProcessedRows = pipelineStats.TotalRows
 
 	// 输出增强的进度日志（包含总行数、字节数、速率）
 	elapsed := time.Since(j.progress.StartTime).Seconds()

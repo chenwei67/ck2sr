@@ -121,7 +121,7 @@ clickhouse:
   - name: myck-1
     mysql:
       host: "localhost"
-      port: 9004
+      port: 9000
       username: "default"
       password: ""
       timeout: "30s"
@@ -218,7 +218,7 @@ clickhouse:
   - name: "myck-1"              # 实例名称，用于引用
     mysql:                       # MySQL 协议配置（用于数据读取）
       host: "localhost"
-      port: 9004
+      port: 9000
       username: "default"
       password: ""
       timeout: "30s"

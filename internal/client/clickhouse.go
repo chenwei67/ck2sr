@@ -8,12 +8,14 @@ import (
 )
 
 type ClickHouseCliMgr struct {
-	cli map[string]*clickhouse.Client
+	cli  map[string]*clickhouse.Client
+	cfgs []config.ClickHouseConfig
 }
 
 func NewClickHouseClientMgr(config []config.ClickHouseConfig) (*ClickHouseCliMgr, error) {
 	ret := &ClickHouseCliMgr{
-		cli: make(map[string]*clickhouse.Client),
+		cli:  make(map[string]*clickhouse.Client),
+		cfgs: config,
 	}
 
 	for _, cfg := range config {
