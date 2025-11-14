@@ -11,10 +11,10 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-// RawValue 表示未解析的原始值（用于延迟解析 JSON）
+// RawValue 表示未解析的原始值，需要在写入时进行解析（用于延迟解析 JSON）
 type RawValue struct {
-	IsJSON bool   // 标识是否为 JSON 类型
-	Data   []byte // 原始字节数据
+	IsJSON  bool   // 标识是否为 JSON 类型
+	Data    []byte // 原始字节数据
 }
 
 // Record 强类型记录结构

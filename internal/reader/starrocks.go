@@ -128,7 +128,6 @@ func (r *StarRocksMySQLReader) GetRecord() (interface{}, error) {
 
 		// NULL 值处理
 		if val == nil {
-			r.logger.Debugf("Column %s is NULL, skipping", columnName)
 			continue
 		}
 
@@ -143,27 +142,29 @@ func (r *StarRocksMySQLReader) GetRecord() (interface{}, error) {
 		switch v := val.(type) {
 		case []byte:
 			// P3 优化：JSON/Array 延迟解析
-			strVal := string(v)
-			if r.isJSONOrArray(strVal) {
-				// 保存为 RawValue，延迟到 Writer 端处理
-				record.Values[i] = RawValue{
-					IsJSON: r.isJSON(strVal),
-					Data:   v, // 直接使用字节数组，避免字符串拷贝
-				}
-			} else {
-				record.Values[i] = strVal
-			}
-
+			// strVal := string(v)
+			// if r.isJSONOrArray(strVal) {
+			// 	// 保存为 RawValue，延迟到 Writer 端处理
+			// 	record.Values[i] = RawValue{
+			// 		IsJSON: r.isJSON(strVal),
+			// 		Data:   v, // 直接使用字节数组，避免字符串拷贝
+			// 	}
+			// } else {
+			// 	record.Values[i] = strVal
+			// }
+			record.Values[i] = string(v)
 		case string:
 			// P3 优化：JSON/Array 延迟解析
-			if r.isJSONOrArray(v) {
-				record.Values[i] = RawValue{
-					IsJSON: r.isJSON(v),
-					Data:   []byte(v),
-				}
-			} else {
-				record.Values[i] = v
-			}
+			// if r.isJSONOrArray(v) {
+			// 	record.Values[i] = RawValue{
+			// 		// IsJSON: r.isJSON(v),
+			// 		IsJSON: false, //TODO: [DEBUG] 先全部标记为非JSON
+			// 		Data:   []byte(v),
+			// 	}
+			// } else {
+			// 	record.Values[i] = v
+			// }
+			record.Values[i] = v
 
 		case int64, int32, int16, int8, int, uint64, uint32, uint16, uint8, uint, float32, float64, bool:
 			// 数值类型直接使用
@@ -214,6 +215,7 @@ func (r *StarRocksMySQLReader) initializeColumnMetadata() error {
 	dataTypes := make([]string, len(columnTypes))
 	for i, ct := range columnTypes {
 		dataTypes[i] = ct.DatabaseTypeName()
+		r.logger.Debugf("[DEBUG] Column %s has type %s", columns[i], dataTypes[i])
 	}
 
 	// 创建共享的列元数据

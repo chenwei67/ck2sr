@@ -60,7 +60,7 @@ func (w *StarRocksHTTPWriter) Write(ctx context.Context, records interface{}) er
 
 	// 打印HTTP请求body数据用于调试
 	w.logger.Infof("stream write %d bytes data", len(data))
-	// w.logger.Debugf("stream write data %+v", string(data)) // 数据量大时不适合打印全部内容，否则会卡死标准输出
+	w.logger.Debugf("[DEBUG] stream write data %+v", string(data)) // 数据量大时不适合打印全部内容，否则会卡死标准输出
 
 	buf := bytes.NewBuffer(data)
 	_, err = w.client.StreamLoad(ctx, options, buf)

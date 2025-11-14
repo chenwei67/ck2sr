@@ -255,7 +255,6 @@ func (r *ClickHouseReader) initializeColumnMetadata() error {
 
 	// 创建记录对象池
 	r.recordPool = NewRecordPool(r.columnMetadata)
-	// r.recordPool.StartDebugLogging(time.Second*30, r.logger) // TODO: [DEBUG] 定时打印池状态（调试用）
 
 	// 初始化扫描目标缓冲区（根据列类型创建正确的目标变量）
 	r.scanDest = make([]interface{}, columnCount)
