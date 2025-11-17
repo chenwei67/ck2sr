@@ -207,26 +207,23 @@ func (s *Scheduler) executePhase1(ctx context.Context) error {
 	semaphore := make(chan struct{}, s.config.Schedule.MaxConcurrentTask)
 	var phase1WG sync.WaitGroup
 
-	for taskID, task := range pendingTasks {
-		phase1WG.Add(1)
-		go func(id string, t TaskExecutor) {
-			defer phase1WG.Done()
-
+	for taskID, task := range pendingTasks { // 注：1.22后循环变量每轮迭代是独立的变量,传入给闭包是并发安全的
+		phase1WG.Go(func() {
 			// 获取信号量
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
-			err := s.executeTaskSync(ctx, t)
+			err := s.executeTaskSync(ctx, task)
 			s.resultsMu.Lock()
-			s.taskResults[id] = err
+			s.taskResults[taskID] = err
 			s.resultsMu.Unlock()
 
 			if err != nil {
-				s.logger.Errorf("Phase 1: Task %s failed: %v", id, err)
+				s.logger.Errorf("Phase 1: Task %s failed: %v", taskID, err)
 			} else {
-				s.logger.Infof("Phase 1: Task %s completed successfully", id)
+				s.logger.Infof("Phase 1: Task %s completed successfully", taskID)
 			}
-		}(taskID, task)
+		})
 	}
 
 	phase1WG.Wait()
