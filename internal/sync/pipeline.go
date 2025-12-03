@@ -2,7 +2,9 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/sunkaimr/ck2sr/internal/storage"
 	"github.com/sunkaimr/ck2sr/internal/writer"
 	"github.com/sunkaimr/ck2sr/pkg/protocol"
+	"github.com/sunkaimr/ck2sr/pkg/retry"
 	"github.com/sunkaimr/ck2sr/pkg/utils"
 )
 
@@ -127,7 +130,29 @@ func (p *Pipeline) Initialize(ctx context.Context, offset uint64, limit uint64) 
 		p.policy.Retry.MaxAttempts, p.policy.Retry.InitialBackoff)
 
 	// 设置查询条件，并执行查询命令
-	query := fmt.Sprintf("SELECT * FROM %s.%s", p.config.Reader.Database, p.srcTable)
+	var selectClause = "*"
+	if strings.EqualFold(p.config.Reader.Vendor, "clickhouse") {
+		var cols []string
+		err := retry.Retry(ctx, &p.policy.Retry, p.logger, "get clickhouse table columns", func() error {
+			var err error
+			cols, err = p.getClickHouseSelectableColumns(ctx, &p.config.Reader, p.srcTable, p.config.Settings.Filter.ExcludeColumns)
+			if err != nil {
+				return fmt.Errorf("Failed to fetch ClickHouse schema for %s.%s, falling back to SELECT *: %v", p.config.Reader.Database, p.srcTable, err)
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("retry failed: %s", err.Error())
+		}
+
+		if len(cols) == 0 {
+			return fmt.Errorf("No selectable columns found for %s.%s after applying exclude list", p.config.Reader.Database, p.srcTable)
+
+		}
+		selectClause = strings.Join(cols, ", ")
+	}
+
+	query := fmt.Sprintf("SELECT %s FROM %s.%s", selectClause, p.config.Reader.Database, p.srcTable)
 	if p.config.Settings.DataRange.TimeColumn != "" {
 		if p.config.Settings.DataRange.StartTime != "" {
 			query += fmt.Sprintf(" WHERE %s >= '%s'", p.config.Settings.DataRange.TimeColumn, p.config.Settings.DataRange.StartTime)
@@ -142,7 +167,6 @@ func (p *Pipeline) Initialize(ctx context.Context, offset uint64, limit uint64) 
 		}
 	}
 	if offset > 0 && limit > 0 {
-		// 兼容性：starRocks强制要求和LIMIT一起使用OFFSET的情况
 		query += fmt.Sprintf(" LIMIT %d OFFSET %d", limit, offset)
 	}
 
@@ -153,6 +177,77 @@ func (p *Pipeline) Initialize(ctx context.Context, offset uint64, limit uint64) 
 
 	p.logger.Infof("Pipeline initialized with %d writer concurrency", p.policy.Transfer.WriterConcurrency)
 	return nil
+}
+
+func (p *Pipeline) getClickHouseSelectableColumns(ctx context.Context, readerCfg *config.DataSourceConfig, table string, exclude []string) ([]string, error) {
+	q := fmt.Sprintf("SELECT name FROM system.columns WHERE database = '%s' AND table = '%s' ORDER BY position", readerCfg.Database, table)
+
+	switch strings.ToLower(readerCfg.Protocol) {
+	case "mysql":
+		cli, err := p.ckClientMgr.GetMySQLClient(readerCfg.Name)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := cli.Query(ctx, q)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+
+		var cols []string
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				return nil, err
+			}
+			if !containsString(exclude, name) {
+				cols = append(cols, name)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return cols, nil
+
+	case "http":
+		cli, err := p.ckClientMgr.GetHTTPClient(readerCfg.Name)
+		if err != nil {
+			return nil, err
+		}
+		data, err := cli.Query(ctx, q, "JSON")
+		if err != nil {
+			return nil, err
+		}
+
+		type chSystemColumnsResp struct {
+			Data []struct {
+				Name string `json:"name"`
+			} `json:"data"`
+		}
+		var resp chSystemColumnsResp
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return nil, fmt.Errorf("failed to parse ClickHouse system.columns response: %w", err)
+		}
+		var cols []string
+		for _, row := range resp.Data {
+			if !containsString(exclude, row.Name) {
+				cols = append(cols, row.Name)
+			}
+		}
+		return cols, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported clickhouse protocol: %s", readerCfg.Protocol)
+	}
+}
+
+func containsString(list []string, target string) bool {
+	for _, v := range list {
+		if v == target {
+			return true
+		}
+	}
+	return false
 }
 
 // Process 异步处理表数据，支持Offset和并发Writer

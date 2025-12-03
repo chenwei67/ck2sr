@@ -251,10 +251,7 @@ func (t *SyncTask) Execute(ctx context.Context) error {
 
 	// 启动所有表的同步作业
 	for tableName, job := range t.jobs {
-		t.wg.Add(1)
-		go func(table string, syncJob TableSyncJob) {
-			defer t.wg.Done()
-
+		t.wg.Go(func() {
 			// 获取信号量
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
@@ -264,14 +261,14 @@ func (t *SyncTask) Execute(ctx context.Context) error {
 			defer execCancel()
 
 			// 执行表同步
-			if err := syncJob.Start(execCtx); err != nil {
-				t.logger.Errorf("Failed to start sync for table %s: %v", table, err)
-				errChan <- fmt.Errorf("table %s: %w", table, err)
+			if err := job.Start(execCtx); err != nil {
+				t.logger.Errorf("Failed to start sync for table %s: %v", tableName, err)
+				errChan <- fmt.Errorf("table %s: %w", tableName, err)
 				return
 			}
 			// 同步成功需要返回 nil
 			errChan <- nil
-		}(tableName, job)
+		})
 	}
 
 	// 等待所有作业完成

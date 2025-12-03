@@ -45,6 +45,12 @@ type Scheduler struct {
 	resultsMu      sync.RWMutex
 }
 
+func (s *Scheduler) setTaskResult(id string, err error) {
+    s.resultsMu.Lock()
+    s.taskResults[id] = err
+    s.resultsMu.Unlock()
+}
+
 func NewScheduler(cfg *config.PolicyConfig, store storage.Storage, logger *logrus.Logger) *Scheduler {
 	return &Scheduler{
 		config:      cfg,
@@ -187,14 +193,10 @@ func (s *Scheduler) executePhase1(ctx context.Context) error {
 			s.logger.Infof("Phase 1: Task %s will be executed (status: %v)", taskID, state)
 		} else if state.Status == storage.TaskStatusSuccess {
 			s.logger.Infof("Phase 1: Task %s already completed, skipping", taskID)
-			s.resultsMu.Lock()
-			s.taskResults[taskID] = nil // 已成功的任务
-			s.resultsMu.Unlock()
+            s.setTaskResult(taskID, nil)
 		} else if state.Status == storage.TaskStatusFailed {
 			s.logger.Infof("Phase 1: Task %s previously failed, will retry in Phase 2", taskID)
-			s.resultsMu.Lock()
-			s.taskResults[taskID] = fmt.Errorf("previously failed") // 标记为失败，等待Phase 2重试
-			s.resultsMu.Unlock()
+            s.setTaskResult(taskID, fmt.Errorf("previously failed"))
 		}
 	}
 
@@ -207,16 +209,14 @@ func (s *Scheduler) executePhase1(ctx context.Context) error {
 	semaphore := make(chan struct{}, s.config.Schedule.MaxConcurrentTask)
 	var phase1WG sync.WaitGroup
 
-	for taskID, task := range pendingTasks { // 注：1.22后循环变量每轮迭代是独立的变量,传入给闭包是并发安全的
+	for taskID, task := range pendingTasks { // 注：1.22后循环变量每轮迭代是独立的变量,传入给闭包是独立的指针，是并发安全的
 		phase1WG.Go(func() {
 			// 获取信号量
 			semaphore <- struct{}{}
 			defer func() { <-semaphore }()
 
 			err := s.executeTaskSync(ctx, task)
-			s.resultsMu.Lock()
-			s.taskResults[taskID] = err
-			s.resultsMu.Unlock()
+            s.setTaskResult(taskID, err)
 
 			if err != nil {
 				s.logger.Errorf("Phase 1: Task %s failed: %v", taskID, err)
@@ -288,9 +288,7 @@ func (s *Scheduler) executePhase2(ctx context.Context) error {
 				defer func() { <-semaphore }()
 
 				err := s.executeTaskSync(ctx, t)
-				s.resultsMu.Lock()
-				s.taskResults[id] = err
-				s.resultsMu.Unlock()
+                s.setTaskResult(id, err)
 
 				if err != nil {
 					s.logger.Errorf("Phase 2: Task %s retry failed: %v", id, err)
