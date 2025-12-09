@@ -180,7 +180,7 @@ func (p *Pipeline) Initialize(ctx context.Context, offset uint64, limit uint64) 
 }
 
 func (p *Pipeline) getClickHouseSelectableColumns(ctx context.Context, readerCfg *config.DataSourceConfig, table string, exclude []string) ([]string, error) {
-	q := fmt.Sprintf("SELECT name FROM system.columns WHERE database = '%s' AND table = '%s' ORDER BY position", readerCfg.Database, table)
+	q := fmt.Sprintf("SELECT name FROM system.columns WHERE database = '%s' AND table = '%s' AND upper(default_kind) != 'EPHEMERAL' ORDER BY position", readerCfg.Database, table)
 
 	switch strings.ToLower(readerCfg.Protocol) {
 	case "mysql":

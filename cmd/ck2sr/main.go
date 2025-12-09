@@ -21,7 +21,7 @@ import (
 
 func main() {
 	// 定义命令行参数
-	configPath := flag.String("config", "./config.yaml", "配置文件路径")
+    configPath := flag.String("config", "", "配置文件路径")
 	version := flag.Bool("version", false, "显示版本信息")
 	flag.Parse()
 
