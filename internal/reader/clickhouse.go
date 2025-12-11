@@ -70,6 +70,10 @@ func (r *ClickHouseHTTPReader) Next() bool {
 	return r.index < len(r.data)
 }
 
+func (r *ClickHouseHTTPReader) Err() error {
+	return nil
+}
+
 // GetRecord 获取当前记录（HTTP Reader需要自定义JSON解析）
 func (r *ClickHouseHTTPReader) GetRecord() (interface{}, error) {
 	return nil, fmt.Errorf("HTTP reader requires custom JSON parsing")
@@ -160,6 +164,11 @@ func (r *ClickHouseReader) Next() bool {
 		return false
 	}
 	return r.rows.Next()
+}
+
+// Next 移动到下一条记录
+func (r *ClickHouseReader) Err() error {
+	return r.rows.Err()
 }
 
 // ReleaseRecords 释放已经被使用完的记录

@@ -326,9 +326,6 @@ func (j *DefaultTableSyncJob) saveProgress() error {
 // onBatchProgress 批次进度回调函数
 // 每次批次写入完成后被Pipeline调用，更新并保存进度
 func (j *DefaultTableSyncJob) onBatchProgress(progress ProgressInfo) {
-	// 释放批次记录内存
-	j.pipeline.reader.ReleaseRecords(progress.BatchRecord)
-
 	// 更新进度信息
 	j.progress.ProcessedRows += progress.ProcessedRows
 	j.progress.ProcessedBatches += progress.BatchCount

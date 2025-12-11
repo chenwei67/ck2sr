@@ -55,6 +55,11 @@ func (r *RetryableReader) Next() bool {
 	return r.underlying.Next()
 }
 
+func (r *RetryableReader) Err() error {
+	return r.underlying.Err()
+}
+
+
 // GetRecord 获取当前记录，支持重试
 func (r *RetryableReader) GetRecord() (interface{}, error) {
 	var record interface{}

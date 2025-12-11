@@ -1,8 +1,8 @@
 package utils
 
 import (
-	"encoding/json"
-	"fmt"
+    "encoding/json"
+    "fmt"
 )
 
 // CalculateRecordSize 计算记录的字节大小
@@ -13,18 +13,22 @@ import (
 //   - int64: 记录的字节大小
 //   - error: 序列化失败时返回错误
 func CalculateRecordSize(record interface{}) (int64, error) {
-	if record == nil {
-		return 0, nil
-	}
+    if record == nil {
+        return 0, nil
+    }
 
-	// 将记录序列化为JSON
-	data, err := json.Marshal(record)
-	if err != nil {
-		return 0, fmt.Errorf("failed to marshal record: %w", err)
-	}
+    // 将记录序列化为JSON
+    data, err := json.Marshal(record)
+    if err != nil {
+        return 0, fmt.Errorf("failed to marshal record: %w", err)
+    }
 
-	// 返回JSON字节数组的长度
-	return int64(len(data)), nil
+    // 返回JSON字节数组的长度
+    return int64(len(data)), nil
+}
+
+func EncodeRecordJSON(record interface{}) ([]byte, error) {
+    return json.Marshal(record)
 }
 
 // CalculateBatchSize 计算批次数据的总字节大小

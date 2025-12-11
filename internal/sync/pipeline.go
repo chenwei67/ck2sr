@@ -1,6 +1,7 @@
 package sync
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -51,9 +52,13 @@ type Pipeline struct {
 
 // DataBatch 数据批次结构
 type DataBatch struct {
-	Data   []interface{} // 数据记录
-	Offset int64         // 当前偏移量
-	Table  string        // 表名
+	Raw          []byte
+	Offset       int64
+	Table        string
+	ProducedAt   time.Time
+	ReadDuration time.Duration
+	Bytes        int64
+	Rows         int
 }
 
 // ProgressInfo 进度信息
@@ -346,9 +351,14 @@ func (p *Pipeline) readData(ctx context.Context, table string) error {
 			break
 		}
 
-		// 构建数据批次，使用动态攒批策略
+		if err := p.reader.Err(); err != nil {
+			return fmt.Errorf("err during iter: %w", err)
+		}
+
 		batch := make([]interface{}, 0, batchSize)
+		rawItems := make([][]byte, 0, batchSize)
 		currentBatchBytes := int64(0)
+		readStart := time.Now()
 
 		for {
 			// 检查上下文取消，避免CTRL+C时阻塞
@@ -374,22 +384,21 @@ func (p *Pipeline) readData(ctx context.Context, table string) error {
 				return fmt.Errorf("failed to get record: %w", err)
 			}
 
-			// 计算记录大小（仅在启用字节数限制时）
-			var recordSize int64
-			if batchBytes > 0 {
-				recordSize, err = utils.CalculateRecordSize(record)
-				if err != nil {
-					p.logger.Warnf("Failed to calculate record size, using 0: %v", err)
-					recordSize = 0
-				}
+			var recBytes []byte
+			recBytes, err = utils.EncodeRecordJSON(record)
+			if err != nil {
+				p.logger.Warnf("Failed to encode record, skipping size: %v", err)
+				recBytes = []byte("null")
 			}
+			recordSize := int64(len(recBytes))
 
 			// 检查是否达到批次限制（在添加记录之前检查）
 			// 规则：如果添加当前记录会超过阈值，则先发送之前的批次
 			shouldSendBatch := false
 			if batchSize > 0 && batchBytes > 0 {
-				// 双重策略：任一条件满足即发送（但至少要有一条记录）
-				if len(batch) > 0 && (len(batch) >= batchSize || currentBatchBytes+recordSize > batchBytes) {
+				// 双重策略：任一条件满足即发送（至少已有一条记录）
+				projected := currentBatchBytes + recordSize + int64(len(rawItems)) + 2
+				if len(batch) > 0 && (len(batch) >= batchSize || projected > batchBytes) {
 					shouldSendBatch = true
 				}
 			} else if batchSize > 0 {
@@ -399,28 +408,33 @@ func (p *Pipeline) readData(ctx context.Context, table string) error {
 				}
 			} else if batchBytes > 0 {
 				// 仅字节数策略（至少要有一条记录）
-				if len(batch) > 0 && currentBatchBytes+recordSize > batchBytes {
+				projected := currentBatchBytes + recordSize + int64(len(rawItems)) + 2
+				if len(batch) > 0 && projected > batchBytes {
 					shouldSendBatch = true
 				}
 			}
 
 			// 如果需要发送批次，先发送已有数据，当前记录放入下一批
 			if shouldSendBatch {
-				// 发送当前批次
-				if err := p.sendBatch(ctx, batch, currentOffset, table); err != nil {
+				if err := p.sendBatch(ctx,  rawItems, currentOffset, table, time.Since(readStart)); err != nil {
 					return err
 				}
+
+				p.reader.ReleaseRecords(batch)
 
 				batchCount++
 				p.updateBatchCount(1)
 
 				// 重置批次
 				batch = make([]interface{}, 0, batchSize)
+				rawItems = make([][]byte, 0, batchSize)
 				currentBatchBytes = 0
+				readStart = time.Now()
 			}
 
 			// 添加当前记录到批次
 			batch = append(batch, record)
+			rawItems = append(rawItems, recBytes)
 			currentBatchBytes += recordSize
 			currentOffset++
 
@@ -428,13 +442,18 @@ func (p *Pipeline) readData(ctx context.Context, table string) error {
 			if !p.reader.Next() {
 				break
 			}
+
+			if err := p.reader.Err(); err != nil {
+				return fmt.Errorf("err during iter: %w", err)
+			}
 		}
 
-		// 发送最后一批数据
 		if len(batch) > 0 {
-			if err := p.sendBatch(ctx, batch, currentOffset, table); err != nil {
+			if err := p.sendBatch(ctx, rawItems, currentOffset, table, time.Since(readStart)); err != nil {
 				return err
 			}
+
+			p.reader.ReleaseRecords(batch)
 
 			batchCount++
 			p.updateBatchCount(1)
@@ -448,16 +467,29 @@ func (p *Pipeline) readData(ctx context.Context, table string) error {
 	return nil
 }
 
-// sendBatch 发送数据批次到channel
-func (p *Pipeline) sendBatch(ctx context.Context, batch []interface{}, offset int64, table string) error {
-	if len(batch) == 0 {
+func (p *Pipeline) sendBatch(ctx context.Context, rawItems [][]byte, offset int64, table string, readDuration time.Duration) error {
+	if len(rawItems) == 0 {
 		return nil
 	}
 
+	var buf bytes.Buffer
+	buf.WriteByte('[')
+	for i, b := range rawItems {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		buf.Write(b)
+	}
+	buf.WriteByte(']')
+
 	dataBatch := DataBatch{
-		Data:   batch,
-		Offset: offset,
-		Table:  table,
+		Raw:          buf.Bytes(),
+		Offset:       offset,
+		Table:        table,
+		ProducedAt:   time.Now(),
+		ReadDuration: readDuration,
+		Bytes:        int64(buf.Len()),
+		Rows:         len(rawItems),
 	}
 
 	select {
@@ -481,7 +513,7 @@ func (p *Pipeline) writerWorker(ctx context.Context, workerID int) {
 				return
 			}
 
-			p.logger.Debugf("Writer worker %d: processing batch with %d records, offset %d", workerID, len(batch.Data), batch.Offset)
+			p.logger.Debugf("Writer worker %d: processing batch with %d records, offset %d", workerID, batch.Rows, batch.Offset)
 			// 处理数据批次
 			if err := p.processBatch(ctx, batch, workerID); err != nil {
 				select {
@@ -496,9 +528,9 @@ func (p *Pipeline) writerWorker(ctx context.Context, workerID int) {
 			progress := ProgressInfo{
 				Table:         batch.Table,
 				Offset:        batch.Offset,
-				ProcessedRows: uint64(len(batch.Data)),
+				ProcessedRows: uint64(batch.Rows),
 				BatchCount:    1,
-				BatchRecord:   batch.Data,
+				BatchRecord:   nil,
 			}
 			p.progressChan <- progress
 
@@ -506,6 +538,7 @@ func (p *Pipeline) writerWorker(ctx context.Context, workerID int) {
 			if p.config.Settings.BatchInterval > 0 {
 				time.Sleep(p.config.Settings.BatchInterval)
 			}
+			p.monitor.AddQueueWaitTime(batch.Table, time.Since(batch.ProducedAt))
 		case <-ctx.Done():
 			p.logger.Debugf("Writer worker %d: context cancelled", workerID)
 			return
@@ -515,8 +548,8 @@ func (p *Pipeline) writerWorker(ctx context.Context, workerID int) {
 
 // processBatch 处理单个数据批次
 func (p *Pipeline) processBatch(ctx context.Context, batch DataBatch, workerID int) error {
-	// 写入数据
-	if err := p.writer.Write(ctx, batch.Data); err != nil {
+	writeStart := time.Now()
+	if err := p.writer.Write(ctx, batch.Raw); err != nil {
 		return fmt.Errorf("worker %d failed to write batch: %w", workerID, err)
 	}
 
@@ -524,18 +557,24 @@ func (p *Pipeline) processBatch(ctx context.Context, batch DataBatch, workerID i
 	if err := p.writer.Flush(ctx); err != nil {
 		return fmt.Errorf("worker %d failed to flush batch: %w", workerID, err)
 	}
-
-	// 计算批次的字节数
-	batchBytes, err := utils.CalculateBatchSize(batch.Data)
-	if err != nil {
-		p.logger.Warnf("Failed to calculate batch size: %v", err)
-		batchBytes = 0
-	}
+	writeDuration := time.Since(writeStart)
 
 	// 更新统计信息：行数和字节数
-	p.monitor.AddRows(batch.Table, int64(len(batch.Data)))
-	p.monitor.AddBytes(batch.Table, batchBytes)
-	p.updateProcessedRows(int64(len(batch.Data)))
+	p.monitor.AddRows(batch.Table, int64(batch.Rows))
+	p.monitor.AddBytes(batch.Table, batch.Bytes)
+	p.monitor.AddReadTime(batch.Table, batch.ReadDuration)
+	p.monitor.AddWriteTime(batch.Table, writeDuration)
+	p.updateProcessedRows(int64(batch.Rows))
+
+	queueWait := time.Since(batch.ProducedAt)
+	p.logger.Infof("Batch timings [%s]: read=%dms queue_wait=%dms write=%dms size=%s rows=%d",
+		batch.Table,
+		batch.ReadDuration.Milliseconds(),
+		queueWait.Milliseconds(),
+		writeDuration.Milliseconds(),
+		utils.FormatBytes(batch.Bytes),
+		batch.Rows,
+	)
 
 	return nil
 }

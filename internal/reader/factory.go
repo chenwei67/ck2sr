@@ -16,6 +16,7 @@ type ExecutableReader interface {
 	SetColumnFilter(excludeColumns []string, fixedValues map[string]interface{}) ExecutableReader
 	SetQuery(query string) ExecutableReader
 	Execute(ctx context.Context) error
+	Err() error
 }
 
 type ReaderFactory interface {

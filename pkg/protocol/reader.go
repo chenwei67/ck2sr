@@ -11,6 +11,9 @@ type DataReader interface {
 	// 返回true表示有数据，false表示已到末尾
 	Next() bool
 
+	// Err Next过程中是否有错误
+	Err() error
+	
 	// GetRecord 获取当前记录
 	// 返回interface{}类型的记录数据，通常为map[string]interface{}
 	GetRecord() (interface{}, error)

@@ -1,15 +1,16 @@
+# ck2sr 配置文件 v2.0
 # ClickHouse 到 StarRocks 数据同步工具配置
 
 # ==================== 数据库连接配置 ====================
 
 # ClickHouse 数据库配置
 clickhouse:
-  - name: myck-1              # 实例名称（用于任务引用）
+  - name: ck0              # 实例名称（用于任务引用）
     mysql:                     # MySQL协议接入配置（用于数据导出）
-      host: "localhost"
+      host: "2.1.92.220"
       port: 9000
-      username: "default"
-      password: ""
+      username: "root"
+      password: "QmDunBxpfMpFbydK9P2y"
       timeout: "30s"
     http:                      # HTTP协议接入配置（用于数据导入）
       host: "localhost"
@@ -20,60 +21,61 @@ clickhouse:
 
 # StarRocks 数据库配置
 starrocks:
-  - name: mysr-1              # 实例名称（用于任务引用）
+  - name: sr0              # 实例名称（用于任务引用）
     mysql:                     # MySQL协议接入配置（用于元数据查询）
-      host: "localhost"
+      host: "2.1.237.28"
       port: 9030
       username: "root"
-      password: ""
+      password: "StarRocks!@2025#."
       timeout: "30s"
     http:                      # HTTP协议接入配置（用于Stream Load数据导入）
-      host: "localhost"
+      host: "2.1.237.28"
       port: 8030
       username: "root"
-      password: ""
+      password: "StarRocks!@2025#."
       timeout: "30s"
 
 # ==================== 同步任务配置 ====================
 
 sync_tasks:
   # 任务1：ClickHouse到StarRocks演示同步
-  - task_id: "ck2sr_demo_001"
+  - task_id: "ck2sr_network_security_log_test"
     name: "ClickHouse到StarRocks演示同步"
     enabled: true                      # 是否启用任务
     priority: 1                        # 优先级（数字越小优先级越高）
 
     # 数据源配置
     reader:
-      name: "myck-1"                   # 引用ClickHouse实例名称
+      name: "ck0"                   # 引用ClickHouse实例名称
       vendor: "clickhouse"             # 数据库厂商：clickhouse/starrocks
       protocol: "mysql"                # 使用协议：mysql/http
-      database: "test"                 # 数据库名
+      database: "business"                 # 数据库名
       tables:                          # 源表列表（支持多张表同步）
-        - "orders"
-        - "users"
+        - "network_security_log"
 
     # 数据目标配置
     writer:
-      name: "mysr-1"                   # 引用StarRocks实例名称
+      name: "sr0"                   # 引用StarRocks实例名称
       vendor: "starrocks"              # 数据库厂商：clickhouse/starrocks
       protocol: "http"                 # 使用协议：mysql/http/flightsql
-      database: "test"                 # 数据库名
+      database: "cw_ck2sr_test"                 # 数据库名
       tables:                          # 目标表列表（与源表一一对应）
-        - "orders_sync"
-        - "users_sync"
+        - "network_security_log"
 
     # 任务级同步设置
     settings:
       # 数据范围过滤
       data_range:
-        time_column: "created_at"             # 时间列名
-        start_time: "2024-01-01 00:00:00"    # 起始时间（空表示不限制）
-        end_time: ""                          # 结束时间（空表示同步到最新数据）
+        time_column: "recordTimestamp"             # 时间列名
+        start_time: 1758144334    # 起始时间（空表示不限制）
+        end_time: 1760523137                          # 结束时间（空表示同步到最新数据）
       # 数据过滤策略
       filter:
         # 排除列列表（在所有任务中排除这些列）
-        exclude_columns: []
+        exclude_columns: [
+          "srcIp_v4_int","srcIp_v6_int","dstIp_v4_int","dstIp_v6_int", "_invert_text", "srcIp_v4", "srcIp_v6",
+          "dstIp_v4", "dstIp_v6", "srcIp_v6_TmpSrConverter", "proofType_TmpSrConverter", "bfAccountList_TmpSrConverter", "bfSuccessList_TmpSrConverter", "bfData_TmpSrConverter", "scanObjectList_TmpSrConverter", "scanSuccessList_TmpSrConverter", "scanData_TmpSrConverter", "pfKeyDataList_TmpSrConverter", "pfDataList_TmpSrConverter", "sslCliHeloExtType_TmpSrConverter", "sslSvrHeloExtType_TmpSrConverter", "sslAlertMsg_TmpSrConverter", "sslCliCert_TmpSrConverter", "sslSvrCert_TmpSrConverter", "sslTopNumPkt_TmpSrConverter", "highlight_TmpSrConverter", "srcIp_v4_TmpSrConverter", "srcIp_v6_TmpSrConverter", "dstIp_v4_TmpSrConverter", "dstIp_v6_TmpSrConverter", "greSrcIp_TmpSrConverter", "greDstIp_TmpSrConverter", "vxlanId_TmpSrConverter", "vlanId_TmpSrConverter", "mplsLabel_TmpSrConverter", "tunnelProtocol_TmpSrConverter"
+        ]
         # - "internal_field"
         # - "temp_column"
         # 固定值列映射（将指定列替换为固定值）
@@ -81,33 +83,33 @@ sync_tasks:
         # sync_timestamp: 1740924169
         # sync_flag: "manual"
       # 批处理设置（任务级别，覆盖全局配置）
-      batch_size: 10000                # 批处理大小（按条数攒批，0表示不限制）
+      batch_size: 100000                # 批处理大小（按条数攒批，0表示不限制）
       batch_bytes: 314572800           # 批处理大小（按字节数攒批，0表示不限制）例如：314572800 表示300MB
-      batch_interval: "5s"             # 批次间隔时间（每批次写入后等待时间）
+      batch_interval: "1s"             # 批次间隔时间（每批次写入后等待时间）
       parallel_tables: 2               # 并行处理表的数量（1表示串行）
 
   # 任务2：StarRocks到ClickHouse演示同步
-  - task_id: "sr2ck_demo_002"
-    name: "StarRocks到ClickHouse演示同步"
-    enabled: false                     # 默认禁用
-    priority: 2
-    reader:
-      name: "mysr-1"
-      vendor: "starrocks"
-      protocol: "mysql"
-      database: "test"
-      tables:
-        - "products"
-    writer:
-      name: "myck-1"
-      vendor: "clickhouse"
-      protocol: "http"
-      database: "test"
-      tables:
-        - "products_sync"
-    settings:
-      batch_size: 5000
-      parallel_tables: 1
+#  - task_id: "sr2ck_demo_001"
+#    name: "StarRocks到ClickHouse演示同步"
+#    enabled: false                     # 默认禁用
+#    priority: 2
+#    reader:
+#      name: "mysr-1"
+#      vendor: "starrocks"
+#      protocol: "mysql"
+#      database: "test"
+#      tables:
+#        - "products"
+#    writer:
+#      name: "myck-1"
+#      vendor: "clickhouse"
+#      protocol: "http"
+#      database: "test"
+#      tables:
+#        - "products_sync"
+#    settings:
+#      batch_size: 5000
+#      parallel_tables: 1
 
 # ==================== 全局策略配置 ====================
 
@@ -152,7 +154,7 @@ monitor:
 # ==================== 日志配置 ====================
 
 log:
-  level: "info"                         # 日志级别：debug（调试）, info（生产推荐）, warn（警告）, error（错误）
+  level: "debug"                         # 日志级别：debug（调试）, info（生产推荐）, warn（警告）, error（错误）
   format: "text"                        # 日志格式：text（人类可读）, json（机器解析）
   output: "stdout"                      # 输出目标：stdout（标准输出）, file（文件）
   file_path: "/var/log/ck2sr/ck2sr.log" # 日志文件路径（output为file时生效）

@@ -84,6 +84,10 @@ func (r *StarRocksMySQLReader) Next() bool {
 	return r.rows.Next()
 }
 
+func (r *StarRocksMySQLReader) Err() error {
+	return r.rows.Err()
+}
+
 func (r *StarRocksMySQLReader) ReleaseRecords(records []interface{}) {
 	for _, rec := range records {
 		if record, ok := rec.(*Record); ok {
@@ -434,6 +438,10 @@ func (r *StarRocksFlightSQLReader) Execute(ctx context.Context) error {
 
 func (r *StarRocksFlightSQLReader) Next() bool {
 	return r.index < len(r.records)
+}
+
+func (r *StarRocksFlightSQLReader) Err() error {
+	return nil
 }
 
 // GetRecord 获取当前记录（FlightSQL Reader）

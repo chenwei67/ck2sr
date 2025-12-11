@@ -279,26 +279,21 @@ func TestPipelineEndTime(t *testing.T) {
 
 // TestDataBatchStructure 测试DataBatch结构
 func TestDataBatchStructure(t *testing.T) {
-	testData := []interface{}{
-		map[string]interface{}{"id": 1, "name": "test1"},
-		map[string]interface{}{"id": 2, "name": "test2"},
-	}
+    batch := DataBatch{
+        Offset: 100,
+        Table:  "test_table",
+        Rows:   2,
+    }
 
-	batch := DataBatch{
-		Data:   testData,
-		Offset: 100,
-		Table:  "test_table",
-	}
-
-	if len(batch.Data) != len(testData) {
-		t.Errorf("Expected batch data length %d, got %d", len(testData), len(batch.Data))
-	}
-	if batch.Offset != 100 {
-		t.Errorf("Expected batch offset 100, got %d", batch.Offset)
-	}
-	if batch.Table != "test_table" {
-		t.Errorf("Expected batch table 'test_table', got '%s'", batch.Table)
-	}
+    if batch.Rows != 2 {
+        t.Errorf("Expected batch rows 2, got %d", batch.Rows)
+    }
+    if batch.Offset != 100 {
+        t.Errorf("Expected batch offset 100, got %d", batch.Offset)
+    }
+    if batch.Table != "test_table" {
+        t.Errorf("Expected batch table 'test_table', got '%s'", batch.Table)
+    }
 }
 
 // TestProgressInfoStructure 测试ProgressInfo结构

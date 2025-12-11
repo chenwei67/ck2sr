@@ -12,12 +12,13 @@ import (
 )
 
 type StarRocksHTTPWriter struct {
-	config *config.DataSourceConfig
-	client *starrocks.HTTPClient
-	logger *logrus.Logger
-	buffer []interface{}
-	table  string
-	ctx    context.Context
+	config   *config.DataSourceConfig
+	client   *starrocks.HTTPClient
+	logger   *logrus.Logger
+	buffer   []interface{}
+	table    string
+	ctx      context.Context
+	lastResp *starrocks.StreamLoadResponse
 }
 
 func NewStarRocksHTTPWriter(cfg *config.DataSourceConfig, cli *starrocks.HTTPClient, logger *logrus.Logger) (*StarRocksHTTPWriter, error) {
@@ -51,24 +52,36 @@ func (w *StarRocksHTTPWriter) Write(ctx context.Context, records interface{}) er
 		Format:   "json",
 	}
 
-	// P0 优化：json.Marshal会调用Record.MarshalJSON()
-	// RawValue字段会被直接写入，避免二次JSON序列化
-	data, err := json.Marshal(records)
-	if err != nil {
-		return fmt.Errorf("failed to marshal record: %w", err)
+	switch v := records.(type) {
+	case []byte:
+		w.logger.Infof("stream write %d bytes data", len(v))
+		buf := bytes.NewBuffer(v)
+		resp, err := w.client.StreamLoad(ctx, options, buf)
+		if err != nil {
+			return fmt.Errorf("failed to stream load: %w", err)
+		}
+		w.lastResp = resp
+		if resp != nil {
+			w.logger.Infof("stream load server timings: read=%dms write=%dms commit=%dms load=%dms", resp.ReadDataTimeMs, resp.WriteDataTimeMs, resp.CommitAndPublishTimeMs, resp.LoadTimeMs)
+		}
+		return nil
+	default:
+		data, err := json.Marshal(records)
+		if err != nil {
+			return fmt.Errorf("failed to marshal record: %w", err)
+		}
+		w.logger.Infof("stream write %d bytes data", len(data))
+		buf := bytes.NewBuffer(data)
+		resp, err := w.client.StreamLoad(ctx, options, buf)
+		if err != nil {
+			return fmt.Errorf("failed to stream load: %w", err)
+		}
+		w.lastResp = resp
+		if resp != nil {
+			w.logger.Infof("stream load server timings: read=%dms write=%dms commit=%dms load=%dms", resp.ReadDataTimeMs, resp.WriteDataTimeMs, resp.CommitAndPublishTimeMs, resp.LoadTimeMs)
+		}
+		return nil
 	}
-
-	// 打印HTTP请求body数据用于调试
-	w.logger.Infof("stream write %d bytes data", len(data))
-	w.logger.Debugf("[DEBUG] stream write data %+v", string(data)) // 数据量大时不适合打印全部内容，否则会卡死标准输出
-
-	buf := bytes.NewBuffer(data)
-	_, err = w.client.StreamLoad(ctx, options, buf)
-	if err != nil {
-		return fmt.Errorf("failed to stream load: %w", err)
-	}
-
-	return nil
 }
 
 func (w *StarRocksHTTPWriter) Flush(ctx context.Context) error {
